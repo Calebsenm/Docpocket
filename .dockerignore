@@ -1,0 +1,15 @@
+.git
+.github
+.gitignore
+LICENSE
+README.md
+docs
+dp_data
+data
+backups
+files
+sdk/ts/node_modules
+sdk/ts/dist
+*.db
+*.exe
+*.log

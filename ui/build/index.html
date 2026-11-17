@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>DocPocket — Panel de Control</title>
+  <link rel="stylesheet" href="/_/style.css">
+</head>
+<body>
+  <!-- Header / Barra Superior -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo-box">
+        <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/>
+          <polyline points="22,6 12,13 2,6"/>
+        </svg>
+      </div>
+      <div class="brand-text">
+        <span class="brand-title">DocPocket</span>
+        <span class="brand-badge">BaaS</span>
+      </div>
+    </div>
+
+    <div class="topbar-actions">
+      <div id="connection-status" class="status-indicator" title="Conexión con el servidor">
+        <span class="status-dot"></span>
+        <span id="status-text" class="status-label">En línea</span>
+      </div>
+      <div id="user-badge" class="user-pill" hidden>
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        <span id="user-email">superusuario</span>
+      </div>
+      <button id="logout" class="btn btn-ghost btn-sm" title="Cerrar sesión" hidden>
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+        <span>Salir</span>
+      </button>
+    </div>
+  </header>
+
+  <main class="app-main">
+    <!-- Vista de Autenticación / Setup -->
+    <section id="auth-section" class="auth-wrap">
+      <div class="auth-card">
+        <div class="auth-header">
+          <div class="auth-logo">DP</div>
+          <h1 id="auth-title">Bienvenido a DocPocket</h1>
+          <p id="auth-subtitle" class="muted">Panel de administración documental en un único binario</p>
+        </div>
+
+        <!-- Setup Inicial -->
+        <div id="setup-box" hidden>
+          <div class="banner info-banner">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+            <span>Configura el primer superusuario. Esta pantalla se bloqueará permanentemente tras su creación.</span>
+          </div>
+          <form id="setup-form" class="form-stack">
+            <div class="input-group">
+              <label for="setup-email">Correo electrónico</label>
+              <input id="setup-email" name="email" type="email" autocomplete="username" placeholder="admin@ejemplo.com" required>
+            </div>
+            <div class="input-group">
+              <label for="setup-password">Contraseña (mínimo 8 caracteres)</label>
+              <input id="setup-password" name="password" type="password" autocomplete="new-password" minlength="8" placeholder="••••••••" required>
+            </div>
+            <button class="btn btn-primary btn-block" type="submit">Crear Superusuario</button>
+          </form>
+        </div>
+
+        <!-- Login -->
+        <div id="login-box">
+          <form id="login-form" class="form-stack">
+            <div class="input-group">
+              <label for="login-email">Correo electrónico</label>
+              <input id="login-email" name="email" type="email" autocomplete="username" placeholder="admin@ejemplo.com" required>
+            </div>
+            <div class="input-group">
+              <label for="login-password">Contraseña</label>
+              <input id="login-password" name="password" type="password" autocomplete="current-password" placeholder="••••••••" required>
+            </div>
+            <button class="btn btn-primary btn-block" type="submit">Iniciar Sesión</button>
+          </form>
+        </div>
+      </div>
+    </section>
+
+    <!-- Vista Principal / Dashboard -->
+    <section id="dashboard" class="dashboard-wrap" hidden>
+      <!-- Navegación de Pestañas -->
+      <nav class="nav-tabs" aria-label="Secciones del panel">
+        <button class="nav-tab active" data-tab="collections">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+          <span>Colecciones</span>
+        </button>
+        <button class="nav-tab" data-tab="tools">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          <span>Reglas de Seguridad CEL</span>
+        </button>
+        <button class="nav-tab" data-tab="maintenance">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span>Mantenimiento & Métricas</span>
+        </button>
+      </nav>
+
+      <!-- Pestaña 1: Colecciones y Explorador -->
+      <div id="tab-collections" class="content-panel">
+        <div class="panel-layout">
+          <!-- Barra Lateral de Colecciones -->
+          <aside class="sidebar-card">
+            <div class="sidebar-header">
+              <h2>Colecciones</h2>
+              <div class="sidebar-actions">
+                <button id="refresh-collections" class="btn btn-icon btn-ghost" title="Recargar lista">
+                  <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                </button>
+                <button id="btn-new-col" class="btn btn-primary btn-sm" title="Crear nueva colección">
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                  <span>Nueva</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- Búsqueda rápida de colecciones -->
+            <div class="search-box">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              <input id="collection-search" type="search" placeholder="Filtrar colecciones…">
+            </div>
+
+            <!-- Lista de Colecciones -->
+            <ul id="collection-list" class="collection-nav-list"></ul>
+          </aside>
+
+          <!-- Vista Detallada de la Colección -->
+          <section id="collection-detail" class="detail-card">
+            <div class="empty-state">
+              <div class="empty-icon">📂</div>
+              <h3>Selecciona una colección</h3>
+              <p class="muted">Elige una colección de la barra lateral o crea una nueva para explorar sus documentos y configuración.</p>
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <!-- Pestaña 2: Probador de Reglas CEL -->
+      <div id="tab-tools" class="content-panel" hidden>
+        <div class="card tools-card">
+          <div class="card-head">
+            <div>
+              <h2>Probador de Reglas CEL</h2>
+              <p class="muted">Prueba expresiones de seguridad en Common Expression Language en tiempo real.</p>
+            </div>
+            <div class="preset-selector">
+              <label for="rule-preset">Plantilla rápida:</label>
+              <select id="rule-preset">
+                <option value="">-- Seleccionar plantilla --</option>
+                <option value="public">Acceso público ("")</option>
+                <option value="auth">Solo usuarios autenticados</option>
+                <option value="owner">Solo el propietario del documento</option>
+                <option value="admin">Solo administradores</option>
+              </select>
+            </div>
+          </div>
+
+          <form id="rule-form" class="form-grid">
+            <div class="input-group">
+              <label for="rule-expr">Expresión CEL</label>
+              <textarea id="rule-expr" name="rule" rows="3" spellcheck="false" placeholder="request.auth != null && resource.owner == request.auth.id">request.auth != null && resource.owner == request.auth.id</textarea>
+            </div>
+            <div class="input-group">
+              <label for="rule-ctx">Contexto de Prueba (JSON)</label>
+              <textarea id="rule-ctx" name="context" rows="9" spellcheck="false">{
+  "operation": "view",
+  "auth": { "id": "user_123", "role": "member" },
+  "resource": { "id": "doc_01", "owner": "user_123" },
+  "body": {},
+  "query": {}
+}</textarea>
+            </div>
+            <div class="form-actions">
+              <button class="btn btn-primary" type="submit">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                <span>Evaluar Regla</span>
+              </button>
+            </div>
+            <div class="output-wrap">
+              <label>Resultado de Evaluación</label>
+              <pre id="rule-result" class="output-box" aria-live="polite">// El resultado aparecerá aquí tras evaluar</pre>
+            </div>
+          </form>
+        </div>
+      </div>
+
+      <!-- Pestaña 3: Mantenimiento & Métricas -->
+      <div id="tab-maintenance" class="content-panel" hidden>
+        <div class="grid-2col">
+          <!-- Métricas del Servidor -->
+          <div class="card">
+            <h2>Métricas del Sistema</h2>
+            <p class="muted">Estado en tiempo real del motor embebido Bbolt y del hub de eventos.</p>
+            <div id="metrics-grid" class="metrics-cards">
+              <div class="metric-item">
+                <span class="metric-val" id="metric-uptime">—</span>
+                <span class="metric-lbl">Tiempo activo</span>
+              </div>
+              <div class="metric-item">
+                <span class="metric-val" id="metric-dbsize">—</span>
+                <span class="metric-lbl">Tamaño BD</span>
+              </div>
+              <div class="metric-item">
+                <span class="metric-val" id="metric-cols">—</span>
+                <span class="metric-lbl">Colecciones</span>
+              </div>
+              <div class="metric-item">
+                <span class="metric-val" id="metric-clients">—</span>
+                <span class="metric-lbl">Clientes SSE</span>
+              </div>
+            </div>
+            <button id="refresh-metrics" class="btn btn-ghost btn-sm mt-3">↻ Actualizar métricas</button>
+          </div>
+
+          <!-- Mantenimiento y Backups -->
+          <div class="card">
+            <h2>Herramientas de Base de Datos</h2>
+            <p class="muted">Verificación de punteros Bbolt y descarga de instantáneas consistentes.</p>
+            <div class="btn-group-vert">
+              <button id="run-check" class="btn">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                <span>Comprobar Integridad (Check)</span>
+              </button>
+              <button id="download-backup" class="btn btn-primary">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                <span>Descargar Copia de Seguridad (.db)</span>
+              </button>
+            </div>
+            <div class="output-wrap mt-3">
+              <label>Informe de Integridad</label>
+              <pre id="maintenance-output" class="output-box" aria-live="polite">// Haz clic en "Comprobar Integridad" para auditar índices y registros</pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Modal: Crear Colección -->
+  <dialog id="modal-new-col" class="modal-dialog">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3>Nueva Colección</h3>
+        <button class="btn btn-icon btn-ghost modal-close" data-close="modal-new-col">✕</button>
+      </div>
+      <form id="collection-form" class="form-stack">
+        <div class="input-group">
+          <label for="col-name">Nombre de la Colección</label>
+          <input id="col-name" name="name" pattern="[A-Za-z][A-Za-z0-9_]{0,63}" placeholder="ej. articulos, tareas, clientes" required>
+        </div>
+        <div class="input-group">
+          <label for="col-type">Tipo de Colección</label>
+          <select id="col-type" name="type">
+            <option value="base">Base (Documentos genéricos)</option>
+            <option value="auth">Auth (Usuarios con email y contraseña)</option>
+          </select>
+        </div>
+        <details class="advanced-details">
+          <summary>Configuración avanzada (Reglas CEL e Índices)</summary>
+          <div class="input-group mt-2">
+            <label for="col-rules">Reglas de Acceso (JSON)</label>
+            <textarea id="col-rules" name="rules" rows="6" spellcheck="false">{
+  "list": "",
+  "view": "",
+  "create": "",
+  "update": "",
+  "delete": ""
+}</textarea>
+          </div>
+          <div class="input-group mt-2">
+            <label for="col-indexes">Índices Secundarios (JSON)</label>
+            <textarea id="col-indexes" name="indexes" rows="3" spellcheck="false">[
+  { "name": "created_idx", "field": "created" }
+]</textarea>
+          </div>
+        </details>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-ghost modal-close" data-close="modal-new-col">Cancelar</button>
+          <button type="submit" class="btn btn-primary">Crear Colección</button>
+        </div>
+      </form>
+    </div>
+  </dialog>
+
+  <!-- Modal: Editor de Documentos -->
+  <dialog id="modal-doc-editor" class="modal-dialog">
+    <div class="modal-box modal-lg">
+      <div class="modal-header">
+        <h3 id="doc-modal-title">Nuevo Documento</h3>
+        <button class="btn btn-icon btn-ghost modal-close" data-close="modal-doc-editor">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="editor-toolbar">
+          <span id="doc-editor-hint" class="muted">Edita el payload JSON del documento</span>
+          <button id="doc-editor-format" class="btn btn-ghost btn-xs">⚡ Formatear JSON</button>
+        </div>
+        <textarea id="record-editor" rows="12" spellcheck="false" class="code-editor"></textarea>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-ghost modal-close" data-close="modal-doc-editor">Cancelar</button>
+        <button id="doc-save-btn" type="button" class="btn btn-primary">Guardar Documento</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Notificaciones Toast -->
+  <div id="toast" class="toast" role="alert" hidden></div>
+
+  <script src="/_/app.js" defer></script>
+</body>
+</html>

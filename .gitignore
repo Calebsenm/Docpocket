@@ -1,0 +1,46 @@
+# Binaries
+/docpocket
+/docpocket.exe
+*.exe
+*.test
+*.out
+
+# Runtime data
+/dp_data/
+/data/
+*.db
+*.db.pre-*
+*.db-shm
+*.db-wal
+/backups/
+/files/
+
+# Coverage and profiles
+coverage.*
+*.prof
+
+# TypeScript SDK
+/sdk/ts/node_modules/
+/sdk/ts/dist/
+*.tsbuildinfo
+
+# Svelte examples
+/examples/*/node_modules/
+/examples/*/dist/
+
+# Environment and editor files
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.log
+*.tmp
+
+# Proposals (dev-only, not committed)
+/propuestas/
