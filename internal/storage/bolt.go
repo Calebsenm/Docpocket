@@ -350,12 +350,21 @@ func (w *writeTx) PutDoc(col string, d Doc) error {
 	}
 
 	now := time.Now()
-	if old == nil {
-		d.SetTimestamps(now, true)
-	} else {
-		// System timestamps are authoritative: created never changes and
-		// updated always reflects the latest write.
-		d[collections.FieldCreated] = old[collections.FieldCreated]
+	// System timestamps default to "now", but a client-provided valid value is
+	// honored (backdating). On update, a missing created falls back to the
+	// stored value so the document keeps a stable origin.
+	if !collections.IsTimestamp(d.GetString(collections.FieldCreated)) {
+		if old != nil {
+			if v, ok := old[collections.FieldCreated].(string); ok && collections.IsTimestamp(v) {
+				d[collections.FieldCreated] = v
+			} else {
+				d[collections.FieldCreated] = collections.FormatTime(now)
+			}
+		} else {
+			d[collections.FieldCreated] = collections.FormatTime(now)
+		}
+	}
+	if !collections.IsTimestamp(d.GetString(collections.FieldUpdated)) {
 		d[collections.FieldUpdated] = collections.FormatTime(now)
 	}
 	if err := def.ValidateDocument(d); err != nil {
@@ -420,7 +429,64 @@ func (w *writeTx) DeleteDoc(col, id string) error {
 			return err
 		}
 	}
-	return docs.Delete(idb)
+	if err := docs.Delete(idb); err != nil {
+		return err
+	}
+	return w.cascadeDelete(col, id, def)
+}
+
+// cascadeDelete removes documents in declared child collections that
+// reference the deleted document. It runs inside the same Bbolt transaction
+// as the parent delete, so the cascade is atomic. Child documents keep their
+// index entries consistent by reusing deleteIndexEntries.
+func (w *writeTx) cascadeDelete(col, id string, def *collections.CollectionDef) error {
+	for _, child := range def.Cascade {
+		childDef, err := w.Collection(child.Collection)
+		if err != nil {
+			if errors.Is(err, ErrCollectionNotFound) {
+				continue
+			}
+			return err
+		}
+		bucket := w.tx.Bucket(docBucket(child.Collection))
+		if bucket == nil {
+			continue
+		}
+		var doomed [][]byte
+		c := bucket.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			doc, err := collections.Decode(v)
+			if err != nil {
+				continue
+			}
+			if ref, ok := collections.GetPath(doc, child.Field).(string); ok && ref == id {
+				doomed = append(doomed, append([]byte(nil), k...))
+			}
+		}
+		for _, key := range doomed {
+			raw := bucket.Get(key)
+			if raw == nil {
+				continue
+			}
+			doc, err := collections.Decode(raw)
+			if err != nil {
+				continue
+			}
+			idb, err := collections.IDBytes(doc.ID())
+			if err != nil {
+				continue
+			}
+			for _, idx := range childDef.Indexes {
+				if err := w.deleteIndexEntries(child.Collection, idx, doc, idb); err != nil {
+					return err
+				}
+			}
+			if err := bucket.Delete(key); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (w *writeTx) SaveCollection(def *collections.CollectionDef) error {
@@ -455,7 +521,7 @@ func (w *writeTx) SaveCollection(def *collections.CollectionDef) error {
 		idx := &def.Indexes[i]
 		if previous != nil {
 			if old, ok := previous.Index(idx.Name); ok {
-				if old.Field != idx.Field || old.Unique != idx.Unique {
+				if old.Field != idx.Field || old.Unique != idx.Unique || old.Fulltext != idx.Fulltext {
 					// Changing the shape of an index requires a rebuild. Keep
 					// the index out of the planner until it is complete.
 					idx.State = "building"
@@ -537,9 +603,22 @@ func (w *writeTx) RawDelete(bucket string, key []byte) error {
 
 func (w *writeTx) putIndexEntries(col string, def *collections.CollectionDef, idx collections.Index, d Doc, idb []byte) error {
 	value := collections.GetPath(d, idx.Field)
-	entries, err := codec.EncodeIndexValues(value)
-	if err != nil {
-		return &collections.ValidationError{Field: idx.Field, Message: "cannot index value: " + err.Error()}
+	var entries [][]byte
+	if idx.Fulltext {
+		s, _ := value.(string)
+		for _, tok := range collections.Tokenize(s) {
+			enc, err := codec.EncodeIndexValue(tok)
+			if err != nil {
+				return &collections.ValidationError{Field: idx.Field, Message: "cannot index value: " + err.Error()}
+			}
+			entries = append(entries, enc)
+		}
+	} else {
+		var err error
+		entries, err = codec.EncodeIndexValues(value)
+		if err != nil {
+			return &collections.ValidationError{Field: idx.Field, Message: "cannot index value: " + err.Error()}
+		}
 	}
 	if len(entries) > maxIndexEntries {
 		return &collections.ValidationError{Field: idx.Field, Message: fmt.Sprintf("too many array elements to index (max %d)", maxIndexEntries)}
@@ -580,14 +659,27 @@ func (w *writeTx) putIndexEntries(col string, def *collections.CollectionDef, id
 }
 
 func (w *writeTx) deleteIndexEntries(col string, idx collections.Index, d Doc, idb []byte) error {
-	entries, err := codec.EncodeIndexValues(collections.GetPath(d, idx.Field))
-	if err != nil {
-		// A document that was writable earlier might now be unindexable after
-		// an index definition change. Rebuild will repair the bucket.
-		if errors.Is(err, codec.ErrNotIndexable) {
-			return nil
+	var entries [][]byte
+	if idx.Fulltext {
+		s, _ := collections.GetPath(d, idx.Field).(string)
+		for _, tok := range collections.Tokenize(s) {
+			enc, err := codec.EncodeIndexValue(tok)
+			if err != nil {
+				return err
+			}
+			entries = append(entries, enc)
 		}
-		return err
+	} else {
+		var err error
+		entries, err = codec.EncodeIndexValues(collections.GetPath(d, idx.Field))
+		if err != nil {
+			// A document that was writable earlier might now be unindexable after
+			// an index definition change. Rebuild will repair the bucket.
+			if errors.Is(err, codec.ErrNotIndexable) {
+				return nil
+			}
+			return err
+		}
 	}
 	b := w.tx.Bucket(indexBucket(col, idx.Name))
 	if b == nil {

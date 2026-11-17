@@ -572,6 +572,52 @@ func (s *Service) Register(collection, email, password string, extra collections
 }
 
 // CreateAdmin creates a superuser. It is used by the CLI and initial setup.
+// ChangePassword updates the password hash of a user record. When
+// currentPassword is not empty it must match the stored hash; superusers may
+// change any password without providing the current one. The token key is
+// rotated so previously issued sessions stop validating.
+func (s *Service) ChangePassword(collection, id, currentPassword, newPassword string) error {
+	if err := ValidatePassword(newPassword); err != nil {
+		return fmt.Errorf("%w: %v", ErrWeakPassword, err)
+	}
+	hash, err := HashPassword(newPassword, s.cfg.Params)
+	if err != nil {
+		return err
+	}
+	tokenKey, err := randomHex(32)
+	if err != nil {
+		return err
+	}
+	return s.store.Update(func(tx storage.WriteTx) error {
+		def, err := tx.Collection(collection)
+		if err != nil {
+			return err
+		}
+		if def.Type != collections.TypeAuth {
+			return ErrNotAuthCollection
+		}
+		doc, ok, err := tx.GetDoc(collection, id)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return storage.ErrNotFound
+		}
+		if currentPassword != "" {
+			ok, err := VerifyPassword(doc.GetString(collections.FieldPasswordHash), currentPassword)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return ErrInvalidCredentials
+			}
+		}
+		doc[collections.FieldPasswordHash] = hash
+		doc[collections.FieldTokenKey] = tokenKey
+		return tx.PutDoc(collection, doc)
+	})
+}
+
 func (s *Service) CreateAdmin(email, password string) (*Identity, error) {
 	email, err := NormalizeEmail(email)
 	if err != nil {

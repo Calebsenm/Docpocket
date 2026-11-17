@@ -156,14 +156,13 @@ func evalComparison(c *Comparison, doc collections.Document, ctx *EvalContext) (
 			return false, nil
 		}
 	case "~":
-		// Provisional text matching: case-insensitive substring. This will be
-		// replaced by a proper full-text operator in a later phase.
+		// Full-text matching: token based, case-insensitive, stopword aware.
 		s, ok := actual.(string)
 		needle, ok2 := expected.(string)
 		if !ok || !ok2 {
 			return false, nil
 		}
-		return strings.Contains(strings.ToLower(s), strings.ToLower(needle)), nil
+		return collections.TextMatch(s, needle), nil
 	default:
 		return false, fmt.Errorf("query: unsupported operator %q", c.Op)
 	}

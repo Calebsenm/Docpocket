@@ -31,21 +31,43 @@ type Field struct {
 }
 
 // Index describes a single-field secondary index. Arrays are indexed using
-// multi-key entries (one entry per element).
+// multi-key entries (one entry per element). Full-text indexes are indexed by
+// token instead of by whole value.
 type Index struct {
-	Name   string `json:"name"`
-	Field  string `json:"field"`
-	Unique bool   `json:"unique,omitempty"`
-	State  string `json:"state"` // building | ready
+	Name     string `json:"name"`
+	Field    string `json:"field"`
+	Unique   bool   `json:"unique,omitempty"`
+	Fulltext bool   `json:"fulltext,omitempty"`
+	State    string `json:"state"` // building | ready
+}
+
+// SavedView is a named, reusable query definition (filter + sort) that users
+// can save and share against a collection.
+type SavedView struct {
+	Name    string `json:"name"`
+	Filter  string `json:"filter"`
+	Sort    string `json:"sort"`
+	OwnerID string `json:"ownerId,omitempty"`
+	Shared  bool   `json:"shared,omitempty"`
+}
+
+// CascadeChild describes a child collection that references the parent
+// document. When the parent is deleted, matching child documents are removed
+// in the same Bbolt transaction (atomic cascade).
+type CascadeChild struct {
+	Collection string `json:"collection"`
+	Field      string `json:"field"`
 }
 
 // CollectionDef is the persisted definition of a collection.
 type CollectionDef struct {
-	Name    string  `json:"name"`
-	Type    string  `json:"type,omitempty"`
-	Fields  []Field `json:"fields,omitempty"`
-	Indexes []Index `json:"indexes,omitempty"`
-	Rules   Rules   `json:"rules,omitempty"`
+	Name    string         `json:"name"`
+	Type    string         `json:"type,omitempty"`
+	Fields  []Field        `json:"fields,omitempty"`
+	Indexes []Index        `json:"indexes,omitempty"`
+	Rules   Rules          `json:"rules,omitempty"`
+	Views   []SavedView    `json:"views,omitempty"`
+	Cascade []CascadeChild `json:"cascade,omitempty"`
 }
 
 var namePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,63}$`)
@@ -109,10 +131,23 @@ func (c *CollectionDef) Validate() error {
 			// The document id is already unique by construction.
 			idx.Unique = false
 		}
+		if idx.Fulltext {
+			// Full-text indexes are multi-key by nature.
+			idx.Unique = false
+		}
 	}
 	for op := range c.Rules {
 		if !validRuleOp(op) {
 			return fmt.Errorf("invalid rule operation %q", op)
+		}
+	}
+	for i := range c.Cascade {
+		cc := &c.Cascade[i]
+		if !ValidName(cc.Collection) {
+			return fmt.Errorf("cascade %q: invalid collection name", cc.Collection)
+		}
+		if !ValidPath(cc.Field) {
+			return fmt.Errorf("cascade %q: invalid field %q", cc.Collection, cc.Field)
 		}
 	}
 	return nil
@@ -134,6 +169,9 @@ func (c *CollectionDef) Normalize() {
 	}
 	if c.Rules == nil {
 		c.Rules = Rules{}
+	}
+	if c.Views == nil {
+		c.Views = []SavedView{}
 	}
 	if c.Type == TypeAuth {
 		ensureField(c, FieldEmail, "string", true)

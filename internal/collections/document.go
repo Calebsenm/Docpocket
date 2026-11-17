@@ -90,6 +90,12 @@ func ParseTime(s string) (time.Time, error) {
 // Now returns the current canonical timestamp.
 func Now() string { return FormatTime(time.Now()) }
 
+// IsTimestamp reports whether s is a valid canonical or RFC3339Nano timestamp.
+func IsTimestamp(s string) bool {
+	_, err := ParseTime(s)
+	return err == nil
+}
+
 // ID returns the document id.
 func (d Document) ID() string {
 	s, _ := d[FieldID].(string)

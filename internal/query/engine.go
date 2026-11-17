@@ -263,6 +263,8 @@ func chooseIndex(def *collections.CollectionDef, comparisons []*Comparison) *col
 		switch c.Op {
 		case "=":
 			score = 100
+		case "~":
+			score = 80
 		case ">", ">=", "<", "<=":
 			score = 50
 		default:
@@ -271,6 +273,9 @@ func chooseIndex(def *collections.CollectionDef, comparisons []*Comparison) *col
 		path := joinPath(c.Path)
 		idx, ok := def.IndexForField(path, true)
 		if !ok {
+			continue
+		}
+		if c.Op == "~" && !idx.Fulltext {
 			continue
 		}
 		if idx.Unique {
@@ -290,10 +295,33 @@ func rangeForIndex(idx *collections.Index, comparisons []*Comparison, ctx *EvalC
 		if joinPath(c.Path) != idx.Field {
 			continue
 		}
-		if c.Op == "in" || c.Op == "contains" || c.Op == "~" || c.Op == "!=" {
+		if c.Op == "in" || c.Op == "contains" || c.Op == "!=" {
 			continue
 		}
 		expected := resolveValue(c.Value, ctx)
+		if c.Op == "~" {
+			if !idx.Fulltext {
+				continue
+			}
+			text, _ := expected.(string)
+			tokens := collections.Tokenize(text)
+			if len(tokens) == 0 {
+				continue
+			}
+			enc, err := codec.EncodeIndexValue(tokens[0])
+			if err != nil {
+				continue
+			}
+			lo := enc
+			hi := codec.PrefixSuccessor(enc)
+			if len(lo) > 0 && (len(lower) == 0 || bytes.Compare(lo, lower) > 0) {
+				lower = append([]byte(nil), lo...)
+			}
+			if len(hi) > 0 && (len(upper) == 0 || bytes.Compare(hi, upper) < 0) {
+				upper = append([]byte(nil), hi...)
+			}
+			continue
+		}
 		enc, err := codec.EncodeIndexValue(expected)
 		if err != nil {
 			continue

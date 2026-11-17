@@ -165,6 +165,51 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, id)
 }
 
+type changePasswordRequest struct {
+	CurrentPassword string `json:"currentPassword"`
+	Password        string `json:"password"`
+}
+
+// handleChangePassword implements
+// PATCH /api/collections/{col}/records/{id}/password. Users can change their
+// own password (with the current one); superusers can change any password.
+func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	col, docID := r.PathValue("col"), r.PathValue("id")
+	def, err := s.collectionByName(col)
+	if err != nil {
+		s.writeServiceError(w, r, err)
+		return
+	}
+	if def.Type != collections.TypeAuth {
+		writeError(w, http.StatusBadRequest, "not_an_auth_collection",
+			"this endpoint is only available for auth collections", nil)
+		return
+	}
+	id := identityFrom(r)
+	if id == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "authentication required", nil)
+		return
+	}
+	if !id.IsAdmin() && id.ID != docID {
+		writeError(w, http.StatusForbidden, "forbidden", "you cannot change this password", nil)
+		return
+	}
+	var req changePasswordRequest
+	if err := s.decodeJSON(w, r, &req); err != nil {
+		s.writeServiceError(w, r, err)
+		return
+	}
+	if !id.IsAdmin() && strings.TrimSpace(req.CurrentPassword) == "" {
+		writeError(w, http.StatusBadRequest, "current_password_required", "current password is required", nil)
+		return
+	}
+	if err := s.auth.ChangePassword(col, docID, req.CurrentPassword, req.Password); err != nil {
+		s.writeServiceError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"changed": true})
+}
+
 // ensureEmailIndex guarantees that auth collections have a unique email index.
 // Existing non-unique indexes are upgraded in place; storage marks them as
 // building again when the shape changes.

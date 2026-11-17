@@ -76,6 +76,25 @@ func (s *Server) listRecords(w http.ResponseWriter, r *http.Request, admin bool)
 			return s.authorizeQuery(def, "list", id, authMap, doc, nil, queryMap)
 		}
 	}
+	if viewName := r.URL.Query().Get("view"); viewName != "" {
+		var found *collections.SavedView
+		for i := range def.Views {
+			if def.Views[i].Name == viewName {
+				found = &def.Views[i]
+				break
+			}
+		}
+		if found == nil {
+			writeError(w, http.StatusNotFound, "view_not_found", "saved view not found", nil)
+			return
+		}
+		if found.Filter != "" {
+			opts.Filter = found.Filter
+		}
+		if found.Sort != "" {
+			opts.Sort = found.Sort
+		}
+	}
 	res, err := s.engine.List(r.Context(), col, opts)
 	if err != nil {
 		s.writeServiceError(w, r, err)
@@ -261,11 +280,6 @@ func (s *Server) updateRecord(w http.ResponseWriter, r *http.Request, patch bool
 		if body.ID() != "" && body.ID() != docID {
 			return &collections.ValidationError{Field: "id", Message: "id cannot be changed"}
 		}
-		if patch {
-			if _, ok := body[collections.FieldCreated]; ok {
-				return &collections.ValidationError{Field: "created", Message: "created is read-only"}
-			}
-		}
 		allowed, err := s.authorize(def, "update", id, old, body, r.URL.Query())
 		if err != nil {
 			return err
@@ -280,7 +294,9 @@ func (s *Server) updateRecord(w http.ResponseWriter, r *http.Request, patch bool
 			next = body.Clone()
 		}
 		next[collections.FieldID] = docID
-		next[collections.FieldCreated] = old[collections.FieldCreated]
+		if !collections.IsTimestamp(next.GetString(collections.FieldCreated)) {
+			next[collections.FieldCreated] = old[collections.FieldCreated]
+		}
 		// Credential fields are managed by the auth service and never accepted
 		// from a generic record update.
 		for _, hidden := range []string{collections.FieldPasswordHash, collections.FieldTokenKey} {
@@ -423,129 +439,409 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := identityFrom(r)
-	results := make([]batchResult, 0, len(req.Operations))
+	var results []batchResult
 	var events []realtime.Event
 	err := s.store.Update(func(tx storage.WriteTx) error {
-		for i, op := range req.Operations {
-			method := strings.ToUpper(op.Method)
-			if op.Collection == "" {
-				return fmt.Errorf("operation %d: collection is required", i)
+		var applyErr error
+		var applyEvents []realtime.Event
+		var applyResults []batchResult
+		applyResults, applyEvents, applyErr = s.applyBatchOps(tx, req.Operations, id)
+		events = applyEvents
+		results = applyResults
+		return applyErr
+	})
+	if err != nil {
+		if errors.Is(err, errForbiddenSentinel) {
+			writeError(w, http.StatusForbidden, "forbidden", err.Error(), nil)
+			return
+		}
+		s.writeServiceError(w, r, err)
+		return
+	}
+	s.hub.Publish(events)
+	for i := range results {
+		if results[i].Record != nil {
+			results[i].Record = sanitizeRecord(results[i].def, results[i].Record)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+}
+
+// applyBatchOps applies a validated batch of operations inside a single
+// storage write transaction. It is shared by POST /api/batch and
+// POST /api/transactions so both accept the same operation shapes.
+func (s *Server) applyBatchOps(tx storage.WriteTx, operations []batchOperation, id *auth.Identity) ([]batchResult, []realtime.Event, error) {
+	results := make([]batchResult, 0, len(operations))
+	var events []realtime.Event
+	for i, op := range operations {
+		method := strings.ToUpper(op.Method)
+		if op.Collection == "" {
+			return nil, nil, fmt.Errorf("operation %d: collection is required", i)
+		}
+		def, err := tx.Collection(op.Collection)
+		if err != nil {
+			return nil, nil, fmt.Errorf("operation %d: %w", i, err)
+		}
+		if method == http.MethodPost && def.Type == collections.TypeAuth {
+			return nil, nil, errForbidden("operation " + fmt.Sprint(i) + ": use auth-register for auth collections")
+		}
+		switch method {
+		case http.MethodPost:
+			body := op.Record
+			if body == nil {
+				body = collections.Document{}
 			}
-			def, err := tx.Collection(op.Collection)
+			if id == nil || !id.IsAdmin() {
+				if err := protectAuthFields(body); err != nil {
+					return nil, nil, errForbidden(err.Error())
+				}
+			}
+			allowed, err := s.authorize(def, "create", id, nil, body, nil)
 			if err != nil {
-				return fmt.Errorf("operation %d: %w", i, err)
+				return nil, nil, err
 			}
-			if method == http.MethodPost && def.Type == collections.TypeAuth {
-				return errForbidden("operation " + fmt.Sprint(i) + ": use auth-register for auth collections")
+			if !allowed {
+				return nil, nil, errForbidden("operation " + fmt.Sprint(i) + ": create not allowed")
 			}
-			switch method {
-			case http.MethodPost:
-				body := op.Record
-				if body == nil {
-					body = collections.Document{}
+			if err := tx.PutDoc(op.Collection, body); err != nil {
+				return nil, nil, fmt.Errorf("operation %d: %w", i, err)
+			}
+			results = append(results, batchResult{Method: method, Collection: op.Collection, Record: body.Clone(), def: def})
+			events = append(events, realtime.Event{Action: "create", Collection: op.Collection, ID: body.ID(), Record: body.Clone()})
+		case http.MethodPatch, http.MethodPut:
+			docID := op.ID
+			if docID == "" && op.Record != nil {
+				docID = op.Record.ID()
+			}
+			if docID == "" {
+				return nil, nil, fmt.Errorf("operation %d: id is required", i)
+			}
+			old, ok, err := tx.GetDoc(op.Collection, docID)
+			if err != nil {
+				return nil, nil, fmt.Errorf("operation %d: %w", i, err)
+			}
+			if !ok {
+				return nil, nil, fmt.Errorf("operation %d: %w", i, storage.ErrNotFound)
+			}
+			body := op.Record
+			if body == nil {
+				body = collections.Document{}
+			}
+			if id == nil || !id.IsAdmin() {
+				if err := protectAuthFields(body); err != nil {
+					return nil, nil, errForbidden(err.Error())
 				}
-				if id == nil || !id.IsAdmin() {
-					if err := protectAuthFields(body); err != nil {
-						return errForbidden(err.Error())
-					}
-				}
-				allowed, err := s.authorize(def, "create", id, nil, body, nil)
-				if err != nil {
-					return err
-				}
-				if !allowed {
-					return errForbidden("operation " + fmt.Sprint(i) + ": create not allowed")
-				}
-				if err := tx.PutDoc(op.Collection, body); err != nil {
-					return fmt.Errorf("operation %d: %w", i, err)
-				}
-				results = append(results, batchResult{Method: method, Collection: op.Collection, Record: body.Clone(), def: def})
-				events = append(events, realtime.Event{Action: "create", Collection: op.Collection, ID: body.ID(), Record: body.Clone()})
-			case http.MethodPatch, http.MethodPut:
-				docID := op.ID
-				if docID == "" && op.Record != nil {
-					docID = op.Record.ID()
-				}
-				if docID == "" {
-					return fmt.Errorf("operation %d: id is required", i)
-				}
-				old, ok, err := tx.GetDoc(op.Collection, docID)
-				if err != nil {
-					return fmt.Errorf("operation %d: %w", i, err)
-				}
-				if !ok {
-					return fmt.Errorf("operation %d: %w", i, storage.ErrNotFound)
-				}
-				body := op.Record
-				if body == nil {
-					body = collections.Document{}
-				}
-				if id == nil || !id.IsAdmin() {
-					if err := protectAuthFields(body); err != nil {
-						return errForbidden(err.Error())
-					}
-				}
-				allowed, err := s.authorize(def, "update", id, old, body, nil)
-				if err != nil {
-					return err
-				}
-				if !allowed {
-					return errForbidden("operation " + fmt.Sprint(i) + ": update not allowed")
-				}
-				next := old.Clone()
-				if method == http.MethodPatch {
-					collections.MergePatch(next, body)
-				} else {
-					next = body.Clone()
-				}
-				next[collections.FieldID] = docID
+			}
+			allowed, err := s.authorize(def, "update", id, old, body, nil)
+			if err != nil {
+				return nil, nil, err
+			}
+			if !allowed {
+				return nil, nil, errForbidden("operation " + fmt.Sprint(i) + ": update not allowed")
+			}
+			next := old.Clone()
+			if method == http.MethodPatch {
+				collections.MergePatch(next, body)
+			} else {
+				next = body.Clone()
+			}
+			next[collections.FieldID] = docID
+			if !collections.IsTimestamp(next.GetString(collections.FieldCreated)) {
 				next[collections.FieldCreated] = old[collections.FieldCreated]
-				for _, hidden := range []string{collections.FieldPasswordHash, collections.FieldTokenKey} {
-					if v, ok := old[hidden]; ok {
-						next[hidden] = v
-					} else {
-						delete(next, hidden)
-					}
-				}
-				if def.Type == collections.TypeAuth && !id.IsAdmin() {
-					next[collections.FieldEmail] = old[collections.FieldEmail]
-					next[collections.FieldVerified] = old[collections.FieldVerified]
-				}
-				if err := tx.PutDoc(op.Collection, next); err != nil {
-					return fmt.Errorf("operation %d: %w", i, err)
-				}
-				results = append(results, batchResult{Method: method, Collection: op.Collection, Record: next.Clone(), def: def})
-				events = append(events, realtime.Event{Action: "update", Collection: op.Collection, ID: docID, Record: next.Clone(), Old: old.Clone()})
-			case http.MethodDelete:
-				docID := op.ID
-				if docID == "" && op.Record != nil {
-					docID = op.Record.ID()
-				}
-				if docID == "" {
-					return fmt.Errorf("operation %d: id is required", i)
-				}
-				old, ok, err := tx.GetDoc(op.Collection, docID)
-				if err != nil {
-					return fmt.Errorf("operation %d: %w", i, err)
-				}
-				if !ok {
-					return fmt.Errorf("operation %d: %w", i, storage.ErrNotFound)
-				}
-				allowed, err := s.authorize(def, "delete", id, old, nil, nil)
-				if err != nil {
-					return err
-				}
-				if !allowed {
-					return errForbidden("operation " + fmt.Sprint(i) + ": delete not allowed")
-				}
-				if err := tx.DeleteDoc(op.Collection, docID); err != nil {
-					return fmt.Errorf("operation %d: %w", i, err)
-				}
-				results = append(results, batchResult{Method: method, Collection: op.Collection, Deleted: true, Record: old.Clone(), def: def})
-				events = append(events, realtime.Event{Action: "delete", Collection: op.Collection, ID: docID, Old: old.Clone()})
-			default:
-				return fmt.Errorf("operation %d: unsupported method %q", i, op.Method)
 			}
+			for _, hidden := range []string{collections.FieldPasswordHash, collections.FieldTokenKey} {
+				if v, ok := old[hidden]; ok {
+					next[hidden] = v
+				} else {
+					delete(next, hidden)
+				}
+			}
+			if def.Type == collections.TypeAuth && !id.IsAdmin() {
+				next[collections.FieldEmail] = old[collections.FieldEmail]
+				next[collections.FieldVerified] = old[collections.FieldVerified]
+			}
+			if err := tx.PutDoc(op.Collection, next); err != nil {
+				return nil, nil, fmt.Errorf("operation %d: %w", i, err)
+			}
+			results = append(results, batchResult{Method: method, Collection: op.Collection, Record: next.Clone(), def: def})
+			events = append(events, realtime.Event{Action: "update", Collection: op.Collection, ID: docID, Record: next.Clone(), Old: old.Clone()})
+		case http.MethodDelete:
+			docID := op.ID
+			if docID == "" && op.Record != nil {
+				docID = op.Record.ID()
+			}
+			if docID == "" {
+				return nil, nil, fmt.Errorf("operation %d: id is required", i)
+			}
+			old, ok, err := tx.GetDoc(op.Collection, docID)
+			if err != nil {
+				return nil, nil, fmt.Errorf("operation %d: %w", i, err)
+			}
+			if !ok {
+				return nil, nil, fmt.Errorf("operation %d: %w", i, storage.ErrNotFound)
+			}
+			allowed, err := s.authorize(def, "delete", id, old, nil, nil)
+			if err != nil {
+				return nil, nil, err
+			}
+			if !allowed {
+				return nil, nil, errForbidden("operation " + fmt.Sprint(i) + ": delete not allowed")
+			}
+			if err := tx.DeleteDoc(op.Collection, docID); err != nil {
+				return nil, nil, fmt.Errorf("operation %d: %w", i, err)
+			}
+			results = append(results, batchResult{Method: method, Collection: op.Collection, Deleted: true, Record: old.Clone(), def: def})
+			events = append(events, realtime.Event{Action: "delete", Collection: op.Collection, ID: docID, Old: old.Clone()})
+		default:
+			return nil, nil, fmt.Errorf("operation %d: unsupported method %q", i, op.Method)
+		}
+	}
+	return results, events, nil
+}
+
+// ---- aggregate ----
+
+type aggregateRequest struct {
+	Op     string `json:"op"`
+	Field  string `json:"field"`
+	Filter string `json:"filter"`
+}
+
+type aggregateResponse struct {
+	Op     string  `json:"op"`
+	Field  string  `json:"field"`
+	Filter string  `json:"filter"`
+	Result float64 `json:"result"`
+}
+
+func (s *Server) handleAggregate(w http.ResponseWriter, r *http.Request) {
+	col := r.PathValue("col")
+	var req aggregateRequest
+	if err := s.decodeJSON(w, r, &req); err != nil {
+		s.writeServiceError(w, r, err)
+		return
+	}
+	if req.Op != query.AggregateOpCount && req.Op != query.AggregateOpSum {
+		writeError(w, http.StatusBadRequest, "invalid_aggregate", "unsupported aggregate op", nil)
+		return
+	}
+	if req.Op == query.AggregateOpSum && strings.TrimSpace(req.Field) == "" {
+		writeError(w, http.StatusBadRequest, "invalid_aggregate", "field is required for sum", nil)
+		return
+	}
+	id := identityFrom(r)
+	admin := id != nil && id.IsAdmin()
+	var def *collections.CollectionDef
+	if err := s.store.View(func(tx storage.ReadTx) error {
+		var err error
+		def, err = tx.Collection(col)
+		return err
+	}); err != nil {
+		s.writeServiceError(w, r, err)
+		return
+	}
+	if !admin {
+		if _, ok := def.RuleSet("list"); !ok {
+			writeError(w, http.StatusForbidden, "forbidden", "list access is not configured for this collection", nil)
+			return
+		}
+	}
+	var authMap map[string]any
+	if id != nil {
+		authMap = id.AuthMap()
+	}
+	var authorize func(collections.Document) (bool, error)
+	if !admin {
+		authorize = func(doc collections.Document) (bool, error) {
+			return s.authorizeQuery(def, "list", id, authMap, doc, nil, nil)
+		}
+	}
+	res, err := s.engine.Aggregate(r.Context(), col, query.AggregateOptions{
+		Filter:    req.Filter,
+		Op:        req.Op,
+		Field:     req.Field,
+		Auth:      authMap,
+		Authorize: authorize,
+	})
+	if err != nil {
+		s.writeServiceError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, aggregateResponse{Op: req.Op, Field: req.Field, Filter: req.Filter, Result: res})
+}
+
+// ---- views ----
+
+func (s *Server) handleListViews(w http.ResponseWriter, r *http.Request) {
+	col := r.PathValue("col")
+	id := identityFrom(r)
+	admin := id != nil && id.IsAdmin()
+	var def *collections.CollectionDef
+	if err := s.store.View(func(tx storage.ReadTx) error {
+		var err error
+		def, err = tx.Collection(col)
+		return err
+	}); err != nil {
+		s.writeServiceError(w, r, err)
+		return
+	}
+	if def == nil {
+		writeError(w, http.StatusNotFound, "collection_not_found", "collection not found", nil)
+		return
+	}
+	out := []collections.SavedView{}
+	for i := range def.Views {
+		v := def.Views[i]
+		if !admin && !v.Shared && v.OwnerID != id.ID {
+			continue
+		}
+		out = append(out, v)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"views": out})
+}
+
+func (s *Server) handleCreateView(w http.ResponseWriter, r *http.Request) {
+	col := r.PathValue("col")
+	id := identityFrom(r)
+	var def *collections.CollectionDef
+	if err := s.store.View(func(tx storage.ReadTx) error {
+		var err error
+		def, err = tx.Collection(col)
+		return err
+	}); err != nil {
+		s.writeServiceError(w, r, err)
+		return
+	}
+	if def == nil {
+		writeError(w, http.StatusNotFound, "collection_not_found", "collection not found", nil)
+		return
+	}
+	var req struct {
+		Name   string `json:"name"`
+		Filter string `json:"filter"`
+		Sort   string `json:"sort"`
+		Shared bool   `json:"shared"`
+	}
+	if err := s.decodeJSON(w, r, &req); err != nil {
+		s.writeServiceError(w, r, err)
+		return
+	}
+	if !collections.ValidName(req.Name) {
+		writeError(w, http.StatusBadRequest, "invalid_view", "invalid view name", nil)
+		return
+	}
+	for i := range def.Views {
+		if def.Views[i].Name == req.Name {
+			writeError(w, http.StatusConflict, "view_already_exists", "saved view already exists", nil)
+			return
+		}
+	}
+	view := collections.SavedView{Name: req.Name, Filter: req.Filter, Sort: req.Sort, OwnerID: id.ID, Shared: req.Shared}
+	def.Views = append(def.Views, view)
+	if err := s.store.Update(func(tx storage.WriteTx) error { return tx.SaveCollection(def) }); err != nil {
+		s.writeServiceError(w, r, err)
+		return
+	}
+	viewRecord := collections.Document{}
+	viewRecord["name"] = view.Name
+	viewRecord["filter"] = view.Filter
+	viewRecord["sort"] = view.Sort
+	viewRecord["ownerId"] = view.OwnerID
+	viewRecord["shared"] = view.Shared
+	s.hub.Publish([]realtime.Event{{
+		Action:     "update",
+		Collection: col,
+		ID:         view.Name,
+		Record:     viewRecord,
+	}})
+	writeJSON(w, http.StatusCreated, view)
+}
+
+func (s *Server) handleDeleteView(w http.ResponseWriter, r *http.Request) {
+	col := r.PathValue("col")
+	name := r.PathValue("name")
+	id := identityFrom(r)
+	admin := id != nil && id.IsAdmin()
+	var def *collections.CollectionDef
+	if err := s.store.View(func(tx storage.ReadTx) error {
+		var err error
+		def, err = tx.Collection(col)
+		return err
+	}); err != nil {
+		s.writeServiceError(w, r, err)
+		return
+	}
+	if def == nil {
+		writeError(w, http.StatusNotFound, "collection_not_found", "collection not found", nil)
+		return
+	}
+	idx := -1
+	for i := range def.Views {
+		if def.Views[i].Name == name {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		writeError(w, http.StatusNotFound, "view_not_found", "saved view not found", nil)
+		return
+	}
+	if !admin && def.Views[idx].OwnerID != id.ID {
+		writeError(w, http.StatusForbidden, "forbidden", "you cannot delete this saved view", nil)
+		return
+	}
+	def.Views = append(def.Views[:idx], def.Views[idx+1:]...)
+	if err := s.store.Update(func(tx storage.WriteTx) error { return tx.SaveCollection(def) }); err != nil {
+		s.writeServiceError(w, r, err)
+		return
+	}
+	s.hub.Publish([]realtime.Event{{
+		Action:     "delete",
+		Collection: col,
+		ID:         name,
+	}})
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
+}
+
+// ---- transactions ----
+
+type transactionBatch struct {
+	Operations []batchOperation `json:"operations"`
+}
+
+type transactionRequest struct {
+	Batches []transactionBatch `json:"batches"`
+}
+
+func (s *Server) handleTransactions(w http.ResponseWriter, r *http.Request) {
+	var req transactionRequest
+	if err := s.decodeJSON(w, r, &req); err != nil {
+		s.writeServiceError(w, r, err)
+		return
+	}
+	if len(req.Batches) == 0 {
+		writeError(w, http.StatusBadRequest, "invalid_transaction", "at least one batch is required", nil)
+		return
+	}
+	id := identityFrom(r)
+	var results []batchResult
+	var events []realtime.Event
+	err := s.store.Update(func(tx storage.WriteTx) error {
+		for _, b := range req.Batches {
+			if len(b.Operations) == 0 {
+				return fmt.Errorf("transaction batch: at least one operation is required")
+			}
+			if len(b.Operations) > 100 {
+				return fmt.Errorf("transaction batch: at most 100 operations are allowed")
+			}
+			batchResults, batchEvents, applyErr := s.applyBatchOps(tx, b.Operations, id)
+			if applyErr != nil {
+				return applyErr
+			}
+			for i := range batchResults {
+				results = append(results, batchResults[i])
+			}
+			events = append(events, batchEvents...)
 		}
 		return nil
 	})

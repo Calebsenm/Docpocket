@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -393,9 +394,28 @@ func TestCollectionRecordCRUD(t *testing.T) {
 		t.Fatalf("unexpected batch: %v", batch)
 	}
 
+	txCreate := api.json("POST", "/api/collections/posts/records", map[string]any{
+		"title": "tx", "views": 5, "slug": "tx",
+	}, "", http.StatusCreated)
+	txID, _ := txCreate["id"].(string)
+	transactions := api.json("POST", "/api/transactions", map[string]any{
+		"batches": []any{
+			map[string]any{"operations": []any{
+				map[string]any{"method": "DELETE", "collection": "posts", "id": txID},
+			}},
+			map[string]any{"operations": []any{
+				map[string]any{"method": "POST", "collection": "posts", "record": map[string]any{"title": "tx2", "views": 6, "slug": "tx2"}},
+			}},
+		},
+	}, "", http.StatusOK)
+	txResults, _ := transactions["results"].([]any)
+	if len(txResults) != 2 || txResults[0].(map[string]any)["deleted"] != true || txResults[1].(map[string]any)["method"] != "POST" {
+		t.Fatalf("unexpected transactions: %v", transactions)
+	}
+
 	collectionsList := api.json("GET", "/api/admin/collections", nil, api.token, http.StatusOK)
 	cols, _ := collectionsList["items"].([]any)
-	if len(cols) != 1 || cols[0].(map[string]any)["documentCount"] != json.Number("2") {
+	if len(cols) != 1 || cols[0].(map[string]any)["documentCount"] != json.Number("3") {
 		t.Fatalf("unexpected admin collections: %v", collectionsList)
 	}
 	reindexed := api.json("POST", "/api/admin/collections/posts/reindex", nil, api.token, http.StatusOK)
@@ -413,6 +433,203 @@ func TestCollectionRecordCRUD(t *testing.T) {
 	api.json("DELETE", "/api/admin/collections/posts", nil, api.token, http.StatusBadRequest)
 	api.json("DELETE", "/api/admin/collections/posts?confirm=posts", nil, api.token, http.StatusNoContent)
 	api.json("GET", "/api/admin/collections/posts", nil, api.token, http.StatusNotFound)
+}
+
+func TestSavedViewsFlow(t *testing.T) {
+	api := newTestAPI(t)
+	api.setupAdmin()
+
+	def := publicBaseCollection("posts", map[string]any{"name": "views_idx", "field": "views"})
+	createdDef := api.createCollection(def)
+	if createdDef["name"] != "posts" {
+		t.Fatalf("unexpected collection: %v", createdDef)
+	}
+
+	first := api.json("POST", "/api/collections/posts/records", map[string]any{
+		"title": "v1", "views": 10, "slug": "v1",
+	}, "", http.StatusCreated)
+	if first["title"] != "v1" {
+		t.Fatalf("unexpected first: %v", first)
+	}
+	second := api.json("POST", "/api/collections/posts/records", map[string]any{
+		"title": "v2", "views": 20, "slug": "v2",
+	}, "", http.StatusCreated)
+	if second["title"] != "v2" {
+		t.Fatalf("unexpected second: %v", second)
+	}
+
+	created := api.json("POST", "/api/collections/posts/views", map[string]any{
+		"name": "high_views", "filter": "views > 5", "sort": "-views",
+	}, api.token, http.StatusCreated)
+	if created["name"] != "high_views" {
+		t.Fatalf("unexpected view: %v", created)
+	}
+	views := api.json("GET", "/api/collections/posts/views", nil, api.token, http.StatusOK)
+	if views["views"] == nil {
+		t.Fatalf("unexpected views list: %v", views)
+	}
+	deleted := api.json("DELETE", "/api/collections/posts/views/high_views", nil, api.token, http.StatusOK)
+	if deleted["deleted"] != true {
+		t.Fatalf("unexpected view delete: %v", deleted)
+	}
+
+	missing := api.json("GET", "/api/collections/posts/records?view=nope", nil, "", http.StatusNotFound)
+	if missing["error"] == nil {
+		t.Fatalf("expected missing view error: %v", missing)
+	}
+	saved := api.json("POST", "/api/collections/posts/views", map[string]any{
+		"name": "all", "filter": "views > 5",
+	}, api.token, http.StatusCreated)
+	if saved["name"] != "all" {
+		t.Fatalf("unexpected saved view: %v", saved)
+	}
+	applied := api.json("GET", "/api/collections/posts/records?view=all", nil, "", http.StatusOK)
+	items, _ := applied["items"].([]any)
+	if len(items) != 2 {
+		t.Fatalf("expected view to filter 2 items, got %v", applied)
+	}
+}
+
+func TestCascadeDelete(t *testing.T) {
+	api := newTestAPI(t)
+	api.setupAdmin()
+
+	parentDef := publicBaseCollection("parents", map[string]any{"name": "slug_idx", "field": "slug", "unique": true})
+	parentDef["cascade"] = []map[string]any{{"collection": "children", "field": "parentId"}}
+	parent := api.createCollection(parentDef)
+	if parent["name"] != "parents" {
+		t.Fatalf("unexpected parent collection: %v", parent)
+	}
+	child := api.createCollection(publicBaseCollection("children"))
+	if child["name"] != "children" {
+		t.Fatalf("unexpected child collection: %v", child)
+	}
+
+	p := api.json("POST", "/api/collections/parents/records", map[string]any{
+		"title": "p1", "slug": "p1",
+	}, "", http.StatusCreated)
+	pid, _ := p["id"].(string)
+	c := api.json("POST", "/api/collections/children/records", map[string]any{
+		"title": "c1", "parentId": pid,
+	}, "", http.StatusCreated)
+	cid, _ := c["id"].(string)
+	api.json("POST", "/api/collections/children/records", map[string]any{
+		"title": "c2", "parentId": "01JX0000000000000000000000",
+	}, "", http.StatusCreated)
+
+	api.json("DELETE", "/api/collections/parents/records/"+pid, nil, "", http.StatusNoContent)
+	api.json("GET", "/api/collections/children/records/"+cid, nil, "", http.StatusNotFound)
+
+	remaining := api.json("GET", "/api/collections/children/records", nil, "", http.StatusOK)
+	items, _ := remaining["items"].([]any)
+	if len(items) != 1 || items[0].(map[string]any)["title"] != "c2" {
+		t.Fatalf("expected only the unrelated child to remain: %v", remaining)
+	}
+}
+
+func TestBackdateTimestamps(t *testing.T) {
+	api := newTestAPI(t)
+	api.setupAdmin()
+	api.createCollection(publicBaseCollection("posts"))
+
+	created := api.json("POST", "/api/collections/posts/records", map[string]any{
+		"title": "backdated", "created": "2020-01-02T03:04:05Z", "updated": "2020-01-02T03:04:05Z",
+	}, "", http.StatusCreated)
+	if created["created"] != "2020-01-02T03:04:05Z" {
+		t.Fatalf("created was not backdated: %v", created)
+	}
+	if created["updated"] != "2020-01-02T03:04:05Z" {
+		t.Fatalf("updated was not backdated: %v", created)
+	}
+
+	patched := api.json("PATCH", "/api/collections/posts/records/"+created["id"].(string), map[string]any{
+		"title": "patched", "updated": "2021-06-07T08:09:10Z",
+	}, "", http.StatusOK)
+	if patched["updated"] != "2021-06-07T08:09:10Z" {
+		t.Fatalf("updated was not backdated on patch: %v", patched)
+	}
+	if patched["created"] != "2020-01-02T03:04:05Z" {
+		t.Fatalf("created changed unexpectedly: %v", patched)
+	}
+}
+
+func TestChangePassword(t *testing.T) {
+	api := newTestAPI(t)
+	api.setupAdmin()
+	api.createCollection(map[string]any{"name": "users", "type": "auth"})
+
+	created := api.json("POST", "/api/collections/users/auth-register", map[string]any{
+		"email": "ana@example.com", "password": "password-123",
+	}, "", http.StatusCreated)
+	token, _ := created["token"].(string)
+	record, _ := created["record"].(map[string]any)
+	uid, _ := record["id"].(string)
+
+	api.json("PATCH", "/api/collections/users/records/"+uid+"/password", map[string]any{
+		"currentPassword": "wrong-password", "password": "new-password-123",
+	}, token, http.StatusUnauthorized)
+
+	changed := api.json("PATCH", "/api/collections/users/records/"+uid+"/password", map[string]any{
+		"currentPassword": "password-123", "password": "new-password-123",
+	}, token, http.StatusOK)
+	if changed["changed"] != true {
+		t.Fatalf("unexpected password change: %v", changed)
+	}
+
+	api.json("POST", "/api/collections/users/auth-with-password", map[string]any{
+		"identity": "ana@example.com", "password": "password-123",
+	}, "", http.StatusUnauthorized)
+	api.json("POST", "/api/collections/users/auth-with-password", map[string]any{
+		"identity": "ana@example.com", "password": "new-password-123",
+	}, "", http.StatusOK)
+
+	api.json("PATCH", "/api/collections/users/records/"+uid+"/password", map[string]any{
+		"password": "admin-set-123",
+	}, api.token, http.StatusOK)
+	api.json("PATCH", "/api/collections/users/records/"+uid+"/password", map[string]any{
+		"currentPassword": "admin-set-123", "password": "short",
+	}, api.token, http.StatusUnprocessableEntity)
+
+	other := api.json("POST", "/api/collections/users/auth-register", map[string]any{
+		"email": "beto@example.com", "password": "password-123",
+	}, "", http.StatusCreated)
+	otherRecord, _ := other["record"].(map[string]any)
+	otherID, _ := otherRecord["id"].(string)
+	anaLogin := api.json("POST", "/api/collections/users/auth-with-password", map[string]any{
+		"identity": "ana@example.com", "password": "admin-set-123",
+	}, "", http.StatusOK)
+	anaToken, _ := anaLogin["token"].(string)
+	api.json("PATCH", "/api/collections/users/records/"+otherID+"/password", map[string]any{
+		"currentPassword": "password-123", "password": "hacked-123",
+	}, anaToken, http.StatusForbidden)
+}
+
+func TestFulltextSearch(t *testing.T) {
+	api := newTestAPI(t)
+	api.setupAdmin()
+	def := publicBaseCollection("docs", map[string]any{"name": "body_ft", "field": "body", "fulltext": true})
+	created := api.createCollection(def)
+	if created["name"] != "docs" {
+		t.Fatalf("unexpected collection: %v", created)
+	}
+
+	api.json("POST", "/api/collections/docs/records", map[string]any{
+		"body": "El rápido zorro salta sobre la valla",
+	}, "", http.StatusCreated)
+	api.json("POST", "/api/collections/docs/records", map[string]any{
+		"body": "Un elefante tranquilo",
+	}, "", http.StatusCreated)
+
+	res := api.json("GET", "/api/collections/docs/records?filter="+url.QueryEscape(`body ~ "rápido"`), nil, "", http.StatusOK)
+	items, _ := res["items"].([]any)
+	if len(items) != 1 || items[0].(map[string]any)["body"] != "El rápido zorro salta sobre la valla" {
+		t.Fatalf("unexpected fulltext results: %v", res)
+	}
+
+	none := api.json("GET", "/api/collections/docs/records?filter="+url.QueryEscape(`body ~ "elefante"`), nil, "", http.StatusOK)
+	if noneItems, _ := none["items"].([]any); len(noneItems) != 1 {
+		t.Fatalf("expected the elephant document: %v", none)
+	}
 }
 
 func TestAuthCollectionFlow(t *testing.T) {
