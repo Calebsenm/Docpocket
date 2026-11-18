@@ -57,10 +57,10 @@ func (s *Server) listRecords(w http.ResponseWriter, r *http.Request, admin bool)
 		writeError(w, http.StatusBadRequest, "invalid_fields", err.Error(), nil)
 		return
 	}
-	include := r.URL.Query().Get("include")
+	// Accept both ?include=a.b&include=c.d and ?include=a.b,c.d.
 	includeFields := []string{}
-	if include != "" {
-		for _, f := range strings.Split(include, ",") {
+	for _, raw := range r.URL.Query()["include"] {
+		for _, f := range strings.Split(raw, ",") {
 			f = strings.TrimSpace(f)
 			if f != "" && collections.ValidPath(f) {
 				includeFields = append(includeFields, f)

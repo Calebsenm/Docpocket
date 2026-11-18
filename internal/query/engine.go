@@ -606,47 +606,49 @@ func minInt(a, b int) int {
 
 // resolveInclude resuelve campos de otras colecciones basándose en el valor
 // de un campo de referencia en el documento actual.
-// Formato esperado en include: "collection.field"
-// Ejemplo: "author.name" → busca el documento de la colección "author" cuyo ID
-// coincide con el valor del campo "author" del documento actual.
+// Formato esperado en include: "reference.field", donde "reference" es a la vez
+// el nombre de la colección destino y el campo del documento actual que guarda
+// el ID referenciado.
+// Ejemplo: "author.name" → toma doc["author"] como ID, busca ese documento en la
+// colección "author" y copia su campo "name" en la clave "author.name".
+// Los campos originales del documento se conservan; si la referencia no existe
+// o el campo resolvido no está, la clave incluida queda a nil.
 func resolveInclude(doc collections.Document, include []string, store storage.Storage) collections.Document {
-	out := collections.Document{collections.FieldID: doc.ID()}
+	out := doc.Clone()
 	for _, inc := range include {
 		parts := strings.Split(inc, ".")
 		if len(parts) != 2 {
 			// Formato inválido, se omite
 			continue
 		}
-		col := parts[0]
-		field := parts[1]
-		// Obtener el valor de referencia del documento actual
-		refID := collections.GetPath(doc, field)
-		if refID == nil {
-			// El campo no existe en este documento, se deja vacío
+		col, field := parts[0], parts[1]
+		// El campo de referencia en el documento actual tiene el mismo nombre
+		// que la colección destino (p. ej. "author" → colección "author").
+		refID := collections.GetPath(doc, col)
+		refStr, ok := refID.(string)
+		if !ok || refStr == "" {
 			out[inc] = nil
 			continue
 		}
-		// Buscar el documento en la colección especificada
 		var resolved collections.Document
 		err := store.View(func(tx storage.ReadTx) error {
-			_, err := tx.Collection(col)
-			if err != nil {
+			if _, err := tx.Collection(col); err != nil {
 				return err
 			}
-			refDoc, ok, err := tx.GetDoc(col, refID.(string))
-			if err != nil || !ok {
+			refDoc, found, err := tx.GetDoc(col, refStr)
+			if err != nil || !found {
 				return nil // No encontrado, se deja vacío
 			}
 			resolved = refDoc
 			return nil
 		})
-		if err == nil && resolved != nil {
-			// Copiar todos los campos del documento resolvido, menos los system fields
-			for k, v := range resolved {
-				if k != collections.FieldID && k != collections.FieldCreated && k != collections.FieldUpdated && k != collections.FieldPasswordHash && k != collections.FieldTokenKey {
-					out[inc] = v
-				}
-			}
+		if err != nil || resolved == nil {
+			out[inc] = nil
+			continue
+		}
+		// Copiar únicamente el campo solicitado del documento resolvido.
+		if v := collections.GetPath(resolved, field); v != nil {
+			out[inc] = v
 		} else {
 			out[inc] = nil
 		}
