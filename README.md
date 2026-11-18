@@ -48,8 +48,6 @@ docpocket version
 | `internal/app` | Server startup and maintenance |
 | `internal/auth` | JWT, refresh tokens, and superusers |
 | `ui/` | Svelte 5 + Vite panel |
-| `sdk/ts/` | TypeScript SDK |
-| `examples/nexo-desk` | Example application |
 
 ## Admin panel
 
@@ -85,44 +83,6 @@ In addition to collection, rule, and backup management, the panel uses these end
 
 CORS and auth limit changes take effect without a restart. `compact` and `restore` block other requests while the database is replaced; active SSE streams can delay the operation.
 
-## TypeScript SDK
-
-```ts
-import { DocPocket } from "docpocket-sdk";
-
-const dp = new DocPocket("http://localhost:8090", {
-  storage: window.localStorage,
-});
-
-await dp.collection("users").authWithPassword("ana@example.com", "strong-password");
-
-const page = await dp.collection("posts").getList({
-  filter: "views > 100",
-  sort: "-created",
-  limit: 20,
-});
-
-await dp.collection("posts").create({ title: "Hello", views: 0 });
-
-const unsubscribe = await dp.collection("posts").subscribe("*", (event) => {
-  console.log(event.action, event.record);
-});
-```
-
-The SDK stores tokens, renews them automatically on 401 responses, reconnects SSE, and re-registers subscriptions with the new `clientId`. See [`sdk/ts/README.md`](sdk/ts/README.md).
-
-## Example: Nexo Desk
-
-`examples/nexo-desk` is an agency suite built on DocPocket: projects, CRM, tasks, time tracking, invoicing, SSE, batch operations, files, server-side queries, and exports. It uses Bun + Vite + Svelte 5 + TypeScript.
-
-```bash
-cd examples/nexo-desk
-bun run bootstrap   # seed demo data (idempotent)
-bun run dev         # http://127.0.0.1:5173
-```
-
-The gaps found while building the example are documented in [`examples/nexo-desk/LIMITATIONS.md`](examples/nexo-desk/LIMITATIONS.md).
-
 ## Tests
 
 ```bash
@@ -131,8 +91,6 @@ cd ui && bun test
 ```
 
 ## Deployment
-
-The full guide (systemd, TLS with ACME or a reverse proxy, backups, restore, compaction, and upgrades) is in [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 
 The included `Dockerfile` builds a static binary and mounts `/data` as a volume:
 
