@@ -1,59 +1,59 @@
 # DocPocket
 
-BaaS documental autoalojado en **un único binario Go** con **Bbolt** como motor embebido. Incluye API REST, autenticación JWT con refresh tokens, reglas de seguridad CEL, tiempo real por SSE, archivos locales y un panel de administración en `/_/`.
+Self-hosted document BaaS in a **single Go binary** with **Bbolt** as the embedded engine. It includes a REST API, JWT authentication with refresh tokens, CEL security rules, real-time updates over SSE, local file storage, and an admin panel at `/_/`.
 
-Sin servicios externos: una base de datos, un proceso y un panel.
+No external services required: one database, one process, and one panel.
 
-## Características
+## Features
 
-- Colecciones con esquemas e índices configurables.
-- API REST con `filter`, `sort`, `fields`, `include`, operaciones `batch` y `transactions`, y agregaciones en servidor.
-- Reglas CEL para controlar el acceso a registros.
-- SSE para suscribirse a cambios en tiempo real.
-- Superusuarios, sesiones de actualización y revocación por familia o identidad.
-- Panel web embebido, backup/restauración y compactación desde CLI o API.
+- Collections with configurable schemas and indexes.
+- REST API with `filter`, `sort`, `fields`, `include`, `batch` and `transactions` operations, and server-side aggregations.
+- CEL rules to control record access.
+- SSE subscriptions for real-time changes.
+- Superusers, refresh sessions, and revocation by family or identity.
+- Embedded web panel, backup/restore, and compaction from the CLI or API.
 
-## Inicio rápido
+## Quick start
 
 ```bash
 go build -o docpocket ./cmd/docpocket
 ./docpocket serve --dir=./dp_data --http=127.0.0.1:8090
 ```
 
-Abre el panel en `http://127.0.0.1:8090/_/` y crea el primer superusuario. También puedes hacerlo por CLI o con `POST /api/admin/setup` (solo funciona mientras no exista ningún superusuario):
+Open the panel at `http://127.0.0.1:8090/_/` and create the first superuser. You can also do it from the CLI or with `POST /api/admin/setup` (which only works while no superuser exists):
 
 ```bash
-./docpocket superuser create --dir=./dp_data admin@example.com 'una-clave-larga'
+./docpocket superuser create --dir=./dp_data admin@example.com 'a-long-password'
 ```
 
-## Comandos
+## Commands
 
 ```
 docpocket serve [flags]
 docpocket backup   [--dir=DIR] [--out=DIR]
-docpocket restore  [--dir=DIR] <archivo>
+docpocket restore  [--dir=DIR] <file>
 docpocket compact  [--dir=DIR]
 docpocket check    [--dir=DIR]
-docpocket reindex  [--dir=DIR] <coleccion> [indice]
-docpocket superuser create [--dir=DIR] <email> <clave>
+docpocket reindex  [--dir=DIR] <collection> [index]
+docpocket superuser create [--dir=DIR] <email> <password>
 docpocket version
 ```
 
-## Estructura
+## Repository layout
 
-| Ruta | Contenido |
+| Path | Contents |
 | --- | --- |
-| `cmd/docpocket` | Punto de entrada del binario |
-| `internal/api` | API REST y endpoints del panel |
-| `internal/app` | Arranque del servidor y mantenimiento |
-| `internal/auth` | JWT, refresh tokens y superusuarios |
-| `ui/` | Panel Svelte 5 + Vite |
-| `sdk/ts/` | SDK TypeScript |
-| `examples/nexo-desk` | Aplicación de ejemplo |
+| `cmd/docpocket` | Binary entry point |
+| `internal/api` | REST API and panel endpoints |
+| `internal/app` | Server startup and maintenance |
+| `internal/auth` | JWT, refresh tokens, and superusers |
+| `ui/` | Svelte 5 + Vite panel |
+| `sdk/ts/` | TypeScript SDK |
+| `examples/nexo-desk` | Example application |
 
-## Panel de administración
+## Admin panel
 
-El panel de `/_/` está escrito en **Svelte 5 + Vite**, se compila a `ui/build/` y se embebe en el binario con `//go:embed`. El contenido de `ui/build/` es generado: no se edita a mano. Para reconstruirlo necesitas [Bun](https://bun.sh), que no hace falta para ejecutar DocPocket:
+The `/_/` panel is built with **Svelte 5 + Vite**, compiled into `ui/build/`, and embedded in the binary with `//go:embed`. The contents of `ui/build/` are generated: do not edit them by hand. Rebuilding requires [Bun](https://bun.sh), which is not needed to run DocPocket:
 
 ```bash
 cd ui
@@ -64,28 +64,28 @@ cd ..
 go build -o docpocket ./cmd/docpocket
 ```
 
-Tiene 11 secciones: Resumen, Colecciones, Usuarios, Archivos, Reglas CEL, Tiempo real, Registro, Mantenimiento, Ajustes, Superusuarios y Sesiones. Incluye editor de esquemas e índices, explorador de registros, vistas guardadas, operaciones `batch` y `transactions`, agregaciones en servidor, SSE en vivo, carga y borrado de archivos, probador de reglas CEL, backup/restauración/compactación y gestión de ajustes, superusuarios y sesiones.
+It has 11 sections: Overview, Collections, Users, Files, CEL Rules, Realtime, Logs, Maintenance, Settings, Admins, and Sessions. It includes a schema and index editor, a record browser, saved views, `batch` and `transactions` operations, server-side aggregations, live SSE, file upload and deletion, a CEL rule tester, backup/restore/compaction, and management of settings, superusers, and sessions.
 
-Los tokens de sesión se guardan en `sessionStorage`, no en `localStorage`. El panel respeta la CSP estricta que sirve el servidor en `/_/`: sin estilos ni scripts en línea, CDN ni `eval`.
+Session tokens are stored in `sessionStorage`, not `localStorage`. The panel respects the strict CSP served by the server for `/_/`: no inline styles or scripts, no CDNs, and no `eval`.
 
-## API de administración
+## Admin API
 
-Además de la gestión de colecciones, reglas y backups, el panel usa estos endpoints. Todos requieren token de superusuario:
+In addition to collection, rule, and backup management, the panel uses these endpoints. All of them require a superuser token:
 
-| Método | Ruta | Uso |
+| Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/admin/logs?status=&q=&limit=` | Registro de peticiones en memoria, con filtros |
-| `GET` / `PATCH` | `/api/admin/settings` | Título, CORS, límite de auth y retención de logs |
-| `GET` / `POST` | `/api/admin/admins` | Listar y crear superusuarios |
-| `DELETE` | `/api/admin/admins/{id}` | Eliminar superusuario (ni el propio ni el último) |
-| `GET` | `/api/admin/sessions?kind=&limit=` | Listar sesiones de actualización, sin exponer tokens |
-| `POST` | `/api/admin/sessions/revoke` | Revocar por familia, identidad o todas |
-| `POST` | `/api/admin/compact` | Compactar la base de datos |
-| `POST` | `/api/admin/restore` | Restaurar un `.db` (multipart `file`) |
+| `GET` | `/api/admin/logs?status=&q=&limit=` | In-memory request log with filters |
+| `GET` / `PATCH` | `/api/admin/settings` | Title, CORS, auth limit, and log retention |
+| `GET` / `POST` | `/api/admin/admins` | List and create superusers |
+| `DELETE` | `/api/admin/admins/{id}` | Delete a superuser (not yourself or the last one) |
+| `GET` | `/api/admin/sessions?kind=&limit=` | List refresh sessions without exposing tokens |
+| `POST` | `/api/admin/sessions/revoke` | Revoke by family, identity, or all |
+| `POST` | `/api/admin/compact` | Compact the database |
+| `POST` | `/api/admin/restore` | Restore a `.db` file (multipart `file`) |
 
-Los cambios de CORS y del límite de autenticación se aplican sin reiniciar. `compact` y `restore` bloquean el resto de peticiones mientras se sustituye la base de datos; las streams SSE activas pueden retrasar la operación.
+CORS and auth limit changes take effect without a restart. `compact` and `restore` block other requests while the database is replaced; active SSE streams can delay the operation.
 
-## SDK TypeScript
+## TypeScript SDK
 
 ```ts
 import { DocPocket } from "docpocket-sdk";
@@ -94,7 +94,7 @@ const dp = new DocPocket("http://localhost:8090", {
   storage: window.localStorage,
 });
 
-await dp.collection("users").authWithPassword("ana@correo.com", "clave-segura");
+await dp.collection("users").authWithPassword("ana@example.com", "strong-password");
 
 const page = await dp.collection("posts").getList({
   filter: "views > 100",
@@ -102,44 +102,44 @@ const page = await dp.collection("posts").getList({
   limit: 20,
 });
 
-await dp.collection("posts").create({ title: "Hola", views: 0 });
+await dp.collection("posts").create({ title: "Hello", views: 0 });
 
 const unsubscribe = await dp.collection("posts").subscribe("*", (event) => {
   console.log(event.action, event.record);
 });
 ```
 
-El SDK guarda tokens, los renueva automáticamente en respuestas 401, reconecta SSE y vuelve a registrar las suscripciones con el `clientId` nuevo. Ver [`sdk/ts/README.md`](sdk/ts/README.md).
+The SDK stores tokens, renews them automatically on 401 responses, reconnects SSE, and re-registers subscriptions with the new `clientId`. See [`sdk/ts/README.md`](sdk/ts/README.md).
 
-## Ejemplo: Nexo Desk
+## Example: Nexo Desk
 
-`examples/nexo-desk` es una suite de agencia construida sobre DocPocket: proyectos, CRM, tareas, tiempo, facturación, SSE, batch, archivos, consultas en servidor y exportación. Usa Bun + Vite + Svelte 5 + TypeScript.
+`examples/nexo-desk` is an agency suite built on DocPocket: projects, CRM, tasks, time tracking, invoicing, SSE, batch operations, files, server-side queries, and exports. It uses Bun + Vite + Svelte 5 + TypeScript.
 
 ```bash
 cd examples/nexo-desk
-bun run bootstrap   # datos de demostración (idempotente)
+bun run bootstrap   # seed demo data (idempotent)
 bun run dev         # http://127.0.0.1:5173
 ```
 
-Las carencias encontradas al construir el ejemplo están en [`examples/nexo-desk/LIMITATIONS.md`](examples/nexo-desk/LIMITATIONS.md).
+The gaps found while building the example are documented in [`examples/nexo-desk/LIMITATIONS.md`](examples/nexo-desk/LIMITATIONS.md).
 
-## Pruebas
+## Tests
 
 ```bash
 go test ./...
 cd ui && bun test
 ```
 
-## Despliegue
+## Deployment
 
-La guía completa (systemd, TLS con ACME o proxy inverso, copias de seguridad, restauración, compactación y actualización) está en [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
+The full guide (systemd, TLS with ACME or a reverse proxy, backups, restore, compaction, and upgrades) is in [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 
-El `Dockerfile` incluido compila un binario estático y monta `/data` como volumen:
+The included `Dockerfile` builds a static binary and mounts `/data` as a volume:
 
 ```bash
 docker build -t docpocket .
 docker run -d --name docpocket -p 8090:8090 -v docpocket-data:/data docpocket
-docker exec -it docpocket docpocket superuser create --dir=/data admin@example.com 'clave-larga'
+docker exec -it docpocket docpocket superuser create --dir=/data admin@example.com 'a-long-password'
 ```
 
-Crea el superusuario antes de exponer el panel a internet.
+Create the superuser before exposing the panel to the internet.
