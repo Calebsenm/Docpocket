@@ -57,17 +57,28 @@ func (s *Server) listRecords(w http.ResponseWriter, r *http.Request, admin bool)
 		writeError(w, http.StatusBadRequest, "invalid_fields", err.Error(), nil)
 		return
 	}
+	include := r.URL.Query().Get("include")
+	includeFields := []string{}
+	if include != "" {
+		for _, f := range strings.Split(include, ",") {
+			f = strings.TrimSpace(f)
+			if f != "" && collections.ValidPath(f) {
+				includeFields = append(includeFields, f)
+			}
+		}
+	}
 	var authMap map[string]any
 	if id != nil {
 		authMap = id.AuthMap()
 	}
 	opts := query.ListOptions{
-		Filter: r.URL.Query().Get("filter"),
-		Sort:   r.URL.Query().Get("sort"),
-		Limit:  limit,
-		Cursor: r.URL.Query().Get("cursor"),
-		Fields: fields,
-		Auth:   authMap,
+		Filter:    r.URL.Query().Get("filter"),
+		Sort:      r.URL.Query().Get("sort"),
+		Limit:     limit,
+		Cursor:    r.URL.Query().Get("cursor"),
+		Fields:    fields,
+		Auth:      authMap,
+		Include:   includeFields,
 	}
 	if !admin {
 		queryURL := r.URL.Query()

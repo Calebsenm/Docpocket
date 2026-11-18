@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/docpocket/docpocket/internal/codec"
@@ -88,6 +89,10 @@ type ListOptions struct {
 	// Authorize is applied after the filter and before pagination. Returning
 	// false hides the document. It is used for collection security rules.
 	Authorize func(collections.Document) (bool, error)
+
+	// Include are dot-separated field paths to resolve from other collections.
+	// Ejemplo: ["author.name", "project.title"]
+	Include []string
 }
 
 // ListResult is a page of documents.
@@ -199,6 +204,13 @@ func (e *Engine) List(ctx context.Context, collection string, opts ListOptions) 
 				projected[i] = Project(d, opts.Fields)
 			}
 			items = projected
+		}
+		if len(opts.Include) > 0 {
+			includeItems := make([]collections.Document, len(items))
+			for i, d := range items {
+				includeItems[i] = resolveInclude(d, opts.Include, e.Store)
+			}
+			items = includeItems
 		}
 		if items == nil {
 			items = []collections.Document{}
@@ -590,6 +602,56 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// resolveInclude resuelve campos de otras colecciones basándose en el valor
+// de un campo de referencia en el documento actual.
+// Formato esperado en include: "collection.field"
+// Ejemplo: "author.name" → busca el documento de la colección "author" cuyo ID
+// coincide con el valor del campo "author" del documento actual.
+func resolveInclude(doc collections.Document, include []string, store storage.Storage) collections.Document {
+	out := collections.Document{collections.FieldID: doc.ID()}
+	for _, inc := range include {
+		parts := strings.Split(inc, ".")
+		if len(parts) != 2 {
+			// Formato inválido, se omite
+			continue
+		}
+		col := parts[0]
+		field := parts[1]
+		// Obtener el valor de referencia del documento actual
+		refID := collections.GetPath(doc, field)
+		if refID == nil {
+			// El campo no existe en este documento, se deja vacío
+			out[inc] = nil
+			continue
+		}
+		// Buscar el documento en la colección especificada
+		var resolved collections.Document
+		err := store.View(func(tx storage.ReadTx) error {
+			_, err := tx.Collection(col)
+			if err != nil {
+				return err
+			}
+			refDoc, ok, err := tx.GetDoc(col, refID.(string))
+			if err != nil || !ok {
+				return nil // No encontrado, se deja vacío
+			}
+			resolved = refDoc
+			return nil
+		})
+		if err == nil && resolved != nil {
+			// Copiar todos los campos del documento resolvido, menos los system fields
+			for k, v := range resolved {
+				if k != collections.FieldID && k != collections.FieldCreated && k != collections.FieldUpdated && k != collections.FieldPasswordHash && k != collections.FieldTokenKey {
+					out[inc] = v
+				}
+			}
+		} else {
+			out[inc] = nil
+		}
+	}
+	return out
 }
 
 // Project returns a copy of d containing only the requested dot-separated
