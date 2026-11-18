@@ -72,13 +72,13 @@ func (s *Server) listRecords(w http.ResponseWriter, r *http.Request, admin bool)
 		authMap = id.AuthMap()
 	}
 	opts := query.ListOptions{
-		Filter:    r.URL.Query().Get("filter"),
-		Sort:      r.URL.Query().Get("sort"),
-		Limit:     limit,
-		Cursor:    r.URL.Query().Get("cursor"),
-		Fields:    fields,
-		Auth:      authMap,
-		Include:   includeFields,
+		Filter:  r.URL.Query().Get("filter"),
+		Sort:    r.URL.Query().Get("sort"),
+		Limit:   limit,
+		Cursor:  r.URL.Query().Get("cursor"),
+		Fields:  fields,
+		Auth:    authMap,
+		Include: includeFields,
 	}
 	if !admin {
 		queryURL := r.URL.Query()
@@ -694,8 +694,11 @@ func (s *Server) handleAggregate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListViews(w http.ResponseWriter, r *http.Request) {
 	col := r.PathValue("col")
-	id := identityFrom(r)
-	admin := id != nil && id.IsAdmin()
+	id := s.requireUser(w, r)
+	if id == nil {
+		return
+	}
+	admin := id.IsAdmin()
 	var def *collections.CollectionDef
 	if err := s.store.View(func(tx storage.ReadTx) error {
 		var err error
@@ -722,7 +725,10 @@ func (s *Server) handleListViews(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateView(w http.ResponseWriter, r *http.Request) {
 	col := r.PathValue("col")
-	id := identityFrom(r)
+	id := s.requireUser(w, r)
+	if id == nil {
+		return
+	}
 	var def *collections.CollectionDef
 	if err := s.store.View(func(tx storage.ReadTx) error {
 		var err error
@@ -780,8 +786,11 @@ func (s *Server) handleCreateView(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDeleteView(w http.ResponseWriter, r *http.Request) {
 	col := r.PathValue("col")
 	name := r.PathValue("name")
-	id := identityFrom(r)
-	admin := id != nil && id.IsAdmin()
+	id := s.requireUser(w, r)
+	if id == nil {
+		return
+	}
+	admin := id.IsAdmin()
 	var def *collections.CollectionDef
 	if err := s.store.View(func(tx storage.ReadTx) error {
 		var err error

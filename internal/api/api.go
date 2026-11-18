@@ -61,38 +61,57 @@ type Hooks struct {
 	OnRecordAfterDelete  func(col string, doc collections.Document, id *auth.Identity)
 }
 
+// MaintenanceReport summarizes a database maintenance operation.
+type MaintenanceReport struct {
+	Before int64  `json:"before"`
+	After  int64  `json:"after"`
+	Backup string `json:"backup"`
+}
+
+// Maintenance is the optional production maintenance contract implemented by
+// the application layer. Implementations must block concurrent HTTP requests
+// for the duration of a store swap.
+type Maintenance interface {
+	Compact(context.Context) (*MaintenanceReport, error)
+	Restore(context.Context, io.Reader) (*MaintenanceReport, error)
+}
+
 // Deps are the services used by the HTTP layer.
 type Deps struct {
-	Config  Config
-	Store   storage.Storage
-	Auth    *auth.Service
-	Rules   *rules.Engine
-	Hub     *realtime.Hub
-	Files   *files.Store
-	Engine  *query.Engine
-	UI      fs.FS
-	Logger  *slog.Logger
-	Hooks   Hooks
-	Version string
+	Config      Config
+	Store       storage.Storage
+	Auth        *auth.Service
+	Rules       *rules.Engine
+	Hub         *realtime.Hub
+	Files       *files.Store
+	Engine      *query.Engine
+	UI          fs.FS
+	Logger      *slog.Logger
+	Hooks       Hooks
+	Version     string
+	Maintenance Maintenance
 }
 
 // Server is the DocPocket HTTP API.
 type Server struct {
-	store   storage.Storage
-	auth    *auth.Service
-	rules   *rules.Engine
-	hub     *realtime.Hub
-	files   *files.Store
-	engine  *query.Engine
-	ui      fs.FS
-	logger  *slog.Logger
-	cfg     Config
-	hooks   Hooks
-	version string
-	started time.Time
-	handler http.Handler
-	limiter *rateLimiter
-	setupMu sync.Mutex
+	store       storage.Storage
+	auth        *auth.Service
+	rules       *rules.Engine
+	hub         *realtime.Hub
+	files       *files.Store
+	engine      *query.Engine
+	ui          fs.FS
+	logger      *slog.Logger
+	cfg         Config
+	hooks       Hooks
+	version     string
+	started     time.Time
+	handler     http.Handler
+	limiter     *rateLimiter
+	settings    *settingsStore
+	logs        *requestLogRing
+	maintenance Maintenance
+	setupMu     sync.Mutex
 }
 
 // New builds the API server.
@@ -123,20 +142,25 @@ func New(deps Deps) (*Server, error) {
 	if deps.Version == "" {
 		deps.Version = "dev"
 	}
+	cfg := deps.Config.withDefaults()
+	settings := newSettingsStore(deps.Store, cfg)
 	s := &Server{
-		store:   deps.Store,
-		auth:    deps.Auth,
-		rules:   deps.Rules,
-		hub:     deps.Hub,
-		files:   deps.Files,
-		engine:  engine,
-		ui:      deps.UI,
-		logger:  logger,
-		cfg:     deps.Config.withDefaults(),
-		hooks:   deps.Hooks,
-		version: deps.Version,
-		started: time.Now(),
-		limiter: newRateLimiter(10, time.Minute),
+		store:       deps.Store,
+		auth:        deps.Auth,
+		rules:       deps.Rules,
+		hub:         deps.Hub,
+		files:       deps.Files,
+		engine:      engine,
+		ui:          deps.UI,
+		logger:      logger,
+		cfg:         cfg,
+		hooks:       deps.Hooks,
+		version:     deps.Version,
+		started:     time.Now(),
+		limiter:     newRateLimiter(settings.Get().AuthRateLimit, time.Minute),
+		settings:    settings,
+		logs:        newRequestLogRing(settings.Get().LogRetention),
+		maintenance: deps.Maintenance,
 	}
 	s.engine.StrictIndexes = s.cfg.StrictIndexes
 	s.hub.SetAuthorizer(s.authorizeRealtimeEvent)
@@ -212,6 +236,17 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/admin/rules/test", s.handleRuleTester)
 	mux.HandleFunc("POST /api/admin/check", s.handleAdminCheck)
 	mux.HandleFunc("GET /api/admin/backup", s.handleAdminBackup)
+
+	mux.HandleFunc("GET /api/admin/logs", s.handleAdminLogs)
+	mux.HandleFunc("GET /api/admin/settings", s.handleAdminGetSettings)
+	mux.HandleFunc("PATCH /api/admin/settings", s.handleAdminPatchSettings)
+	mux.HandleFunc("GET /api/admin/admins", s.handleAdminListAdmins)
+	mux.HandleFunc("POST /api/admin/admins", s.handleAdminCreateAdmin)
+	mux.HandleFunc("DELETE /api/admin/admins/{id}", s.handleAdminDeleteAdmin)
+	mux.HandleFunc("GET /api/admin/sessions", s.handleAdminListSessions)
+	mux.HandleFunc("POST /api/admin/sessions/revoke", s.handleAdminRevokeSessions)
+	mux.HandleFunc("POST /api/admin/compact", s.handleAdminCompact)
+	mux.HandleFunc("POST /api/admin/restore", s.handleAdminRestore)
 
 	mux.HandleFunc("GET /_/", s.handleUI)
 	mux.HandleFunc("GET /{$}", s.handleRoot)
@@ -327,6 +362,12 @@ func mapError(err error) (int, string, string, map[string]any) {
 		return http.StatusUnprocessableEntity, "invalid_email", err.Error(), nil
 	case errors.Is(err, auth.ErrSetupComplete):
 		return http.StatusConflict, "setup_complete", err.Error(), nil
+	case errors.Is(err, auth.ErrAdminLast):
+		return http.StatusConflict, "admin_last", err.Error(), nil
+	case errors.Is(err, auth.ErrAdminSelf):
+		return http.StatusConflict, "admin_self", err.Error(), nil
+	case errors.Is(err, auth.ErrAdminNotFound):
+		return http.StatusNotFound, "admin_not_found", err.Error(), nil
 	case errors.Is(err, files.ErrTooLarge):
 		return http.StatusRequestEntityTooLarge, "file_too_large", err.Error(), nil
 	case errors.Is(err, files.ErrInvalidName), errors.Is(err, files.ErrInvalidPath):

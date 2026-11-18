@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net/mail"
+	"sort"
 	"strings"
 	"time"
 
@@ -37,6 +38,9 @@ var (
 	ErrInvalidEmail       = errors.New("invalid email address")
 	ErrRefreshReuse       = errors.New("refresh token reuse detected; session family revoked")
 	ErrSetupComplete      = errors.New("setup was already completed")
+	ErrAdminLast          = errors.New("cannot delete the last superuser")
+	ErrAdminSelf          = errors.New("cannot delete the currently authenticated superuser")
+	ErrAdminNotFound      = errors.New("superuser not found")
 )
 
 // Config configures authentication.
@@ -124,6 +128,27 @@ type refreshRecord struct {
 	ExpiresAt  time.Time `json:"expiresAt"`
 	CreatedAt  time.Time `json:"createdAt"`
 	Used       bool      `json:"used,omitempty"`
+}
+
+// AdminInfo is the sanitized superuser representation for the admin panel.
+type AdminInfo struct {
+	ID      string `json:"id"`
+	Email   string `json:"email"`
+	Created string `json:"created"`
+	Updated string `json:"updated"`
+}
+
+// SessionInfo is the sanitized refresh-session representation for the admin
+// panel. TokenId is a short prefix of the stored hash, never a usable token.
+type SessionInfo struct {
+	TokenID    string `json:"tokenId"`
+	Kind       string `json:"kind"`
+	UserID     string `json:"userId"`
+	Collection string `json:"collection"`
+	Family     string `json:"family"`
+	CreatedAt  string `json:"createdAt"`
+	ExpiresAt  string `json:"expiresAt"`
+	Used       bool   `json:"used"`
 }
 
 type subject struct {
@@ -433,10 +458,19 @@ func (s *Service) Logout(refreshToken string) error {
 // RevokeAllSessions rotates the user's token key and deletes refresh tokens.
 // Existing access tokens become invalid immediately.
 func (s *Service) RevokeAllSessions(identity *Identity) error {
+	_, err := s.RevokeAllSessionsWithCount(identity)
+	return err
+}
+
+// RevokeAllSessionsWithCount behaves like RevokeAllSessions and also reports
+// how many refresh records were deleted in the same transaction as the token
+// key rotation.
+func (s *Service) RevokeAllSessionsWithCount(identity *Identity) (int, error) {
 	if identity == nil {
-		return ErrUnauthorized
+		return 0, ErrUnauthorized
 	}
-	return s.store.Update(func(tx storage.WriteTx) error {
+	revoked := 0
+	err := s.store.Update(func(tx storage.WriteTx) error {
 		sub, err := loadSubject(tx, identity.Kind, identity.Collection, identity.ID)
 		if err != nil {
 			return err
@@ -459,8 +493,10 @@ func (s *Service) RevokeAllSessions(identity *Identity) error {
 				return err
 			}
 		}
-		return revokeSubjectTokens(tx, sub.kind, sub.collection, sub.id)
+		revoked, err = revokeSubjectTokensCount(tx, sub.kind, sub.collection, sub.id)
+		return err
 	})
+	return revoked, err
 }
 
 // Register creates a user in an auth collection and starts a session.
@@ -717,6 +753,160 @@ func (s *Service) AdminCount() (int, error) {
 	return count, err
 }
 
+// ListAdmins returns superusers without password hashes or token keys.
+func (s *Service) ListAdmins() ([]AdminInfo, error) {
+	var admins []AdminInfo
+	err := s.store.View(func(tx storage.ReadTx) error {
+		entries, err := tx.RawScan(adminsBucket, nil)
+		if err != nil {
+			return err
+		}
+		admins = make([]AdminInfo, 0, len(entries))
+		for _, e := range entries {
+			doc, err := collections.Decode(e.Value)
+			if err != nil {
+				continue
+			}
+			admins = append(admins, AdminInfo{
+				ID:      doc.ID(),
+				Email:   doc.GetString(collections.FieldEmail),
+				Created: doc.GetString(collections.FieldCreated),
+				Updated: doc.GetString(collections.FieldUpdated),
+			})
+		}
+		return nil
+	})
+	sort.Slice(admins, func(i, j int) bool { return admins[i].Created < admins[j].Created })
+	return admins, err
+}
+
+// DeleteAdmin removes a superuser and its sessions. It refuses to remove the
+// last superuser or the principal making the request.
+func (s *Service) DeleteAdmin(id, currentID string) error {
+	return s.store.Update(func(tx storage.WriteTx) error {
+		entries, err := tx.RawScan(adminsBucket, nil)
+		if err != nil {
+			return err
+		}
+		found := false
+		for _, e := range entries {
+			doc, err := collections.Decode(e.Value)
+			if err == nil && doc.ID() == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return ErrAdminNotFound
+		}
+		if len(entries) <= 1 {
+			return ErrAdminLast
+		}
+		if currentID != "" && currentID == id {
+			return ErrAdminSelf
+		}
+		if err := tx.RawDelete(adminsBucket, []byte(id)); err != nil {
+			return err
+		}
+		return revokeSubjectTokens(tx, "admin", "", id)
+	})
+}
+
+// ListSessions returns sanitized refresh sessions, newest first. The optional
+// kind filters by "admin" or "user"; limit <= 0 means no application-side cap.
+func (s *Service) ListSessions(kind string, limit int) ([]SessionInfo, error) {
+	var sessions []SessionInfo
+	err := s.store.View(func(tx storage.ReadTx) error {
+		entries, err := tx.RawScan(refreshBucket, nil)
+		if err != nil {
+			return err
+		}
+		sessions = make([]SessionInfo, 0, len(entries))
+		for _, e := range entries {
+			var rec refreshRecord
+			if err := json.Unmarshal(e.Value, &rec); err != nil {
+				continue
+			}
+			if kind != "" && rec.Kind != kind {
+				continue
+			}
+			tokenID := string(e.Key)
+			if len(tokenID) > 12 {
+				tokenID = tokenID[:12]
+			}
+			sessions = append(sessions, SessionInfo{
+				TokenID:    tokenID,
+				Kind:       rec.Kind,
+				UserID:     rec.UserID,
+				Collection: rec.Collection,
+				Family:     rec.Family,
+				CreatedAt:  rec.CreatedAt.UTC().Format(time.RFC3339),
+				ExpiresAt:  rec.ExpiresAt.UTC().Format(time.RFC3339),
+				Used:       rec.Used,
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(sessions, func(i, j int) bool {
+		if sessions[i].CreatedAt == sessions[j].CreatedAt {
+			return sessions[i].TokenID < sessions[j].TokenID
+		}
+		return sessions[i].CreatedAt > sessions[j].CreatedAt
+	})
+	if limit > 0 && len(sessions) > limit {
+		sessions = sessions[:limit]
+	}
+	return sessions, nil
+}
+
+// RevokeFamily deletes every refresh record in a family in one transaction.
+func (s *Service) RevokeFamily(family string) (int, error) {
+	if family == "" {
+		return 0, nil
+	}
+	revoked := 0
+	err := s.store.Update(func(tx storage.WriteTx) error {
+		entries, err := tx.RawScan(refreshBucket, nil)
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			var rec refreshRecord
+			if err := json.Unmarshal(e.Value, &rec); err != nil || rec.Family != family {
+				continue
+			}
+			if err := tx.RawDelete(refreshBucket, e.Key); err != nil {
+				return err
+			}
+			revoked++
+		}
+		return nil
+	})
+	return revoked, err
+}
+
+// RevokeAllRefreshTokens deletes every refresh record in one transaction.
+func (s *Service) RevokeAllRefreshTokens() (int, error) {
+	revoked := 0
+	err := s.store.Update(func(tx storage.WriteTx) error {
+		entries, err := tx.RawScan(refreshBucket, nil)
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			if err := tx.RawDelete(refreshBucket, e.Key); err != nil {
+				return err
+			}
+			revoked++
+		}
+		return nil
+	})
+	return revoked, err
+}
+
 // Identify validates an access token and loads the current principal.
 func (s *Service) Identify(token string) (*Identity, error) {
 	if token == "" {
@@ -940,10 +1130,16 @@ func revokeFamily(tx storage.WriteTx, family string) error {
 }
 
 func revokeSubjectTokens(tx storage.WriteTx, kind, collection, id string) error {
+	_, err := revokeSubjectTokensCount(tx, kind, collection, id)
+	return err
+}
+
+func revokeSubjectTokensCount(tx storage.WriteTx, kind, collection, id string) (int, error) {
 	entries, err := tx.RawScan(refreshBucket, nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
+	revoked := 0
 	for _, e := range entries {
 		var rec refreshRecord
 		if err := json.Unmarshal(e.Value, &rec); err != nil {
@@ -951,11 +1147,12 @@ func revokeSubjectTokens(tx storage.WriteTx, kind, collection, id string) error 
 		}
 		if rec.Kind == kind && rec.Collection == collection && rec.UserID == id {
 			if err := tx.RawDelete(refreshBucket, e.Key); err != nil {
-				return err
+				return revoked, err
 			}
+			revoked++
 		}
 	}
-	return nil
+	return revoked, nil
 }
 
 func hashToken(raw string) string {

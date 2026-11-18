@@ -24,6 +24,10 @@ coverage.*
 /sdk/ts/dist/
 *.tsbuildinfo
 
+# Admin panel (Svelte + Vite; only ui/build is committed)
+/ui/node_modules/
+/ui/.vite/
+
 # Svelte examples
 /examples/*/node_modules/
 /examples/*/dist/

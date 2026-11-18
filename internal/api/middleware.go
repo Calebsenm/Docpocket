@@ -74,12 +74,14 @@ func (s *Server) logMiddleware(next http.Handler) http.Handler {
 		if rec.status == 0 {
 			rec.status = http.StatusOK
 		}
+		duration := time.Since(start)
+		s.recordRequestLog(r, rec.status, rec.bytes, duration)
 		s.logger.LogAttrs(r.Context(), slog.LevelInfo, "http request",
 			slog.String("method", r.Method),
 			slog.String("path", r.URL.Path),
 			slog.Int("status", rec.status),
 			slog.Int("bytes", rec.bytes),
-			slog.Duration("duration", time.Since(start)),
+			slog.Duration("duration", duration),
 			slog.String("ip", clientIP(r, s.cfg.TrustProxy)),
 			slog.String("request_id", w.Header().Get("X-Request-ID")),
 		)
@@ -211,17 +213,20 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 }
 
 func (s *Server) corsMiddleware(next http.Handler) http.Handler {
-	allowed := map[string]bool{}
-	wildcard := false
-	for _, o := range s.cfg.CORSOrigins {
-		o = strings.TrimSpace(o)
-		if o == "*" {
-			wildcard = true
-		} else if o != "" {
-			allowed[o] = true
-		}
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Settings are read on every request: PATCH /api/admin/settings must
+		// take effect without a restart or a data race with this middleware.
+		origins := s.settings.Get().CORSOrigins
+		allowed := map[string]bool{}
+		wildcard := false
+		for _, o := range origins {
+			o = strings.TrimSpace(o)
+			if o == "*" {
+				wildcard = true
+			} else if o != "" {
+				allowed[o] = true
+			}
+		}
 		origin := r.Header.Get("Origin")
 		if origin != "" && (wildcard || allowed[origin]) {
 			if wildcard {
@@ -295,10 +300,9 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) *auth.Iden
 // ---- rate limiting ----
 
 type rateLimiter struct {
-	mu       sync.Mutex
-	capacity float64
-	window   time.Duration
-	buckets  map[string]*rateBucket
+	mu      sync.Mutex
+	window  time.Duration
+	buckets map[string]*rateBucket
 }
 
 type rateBucket struct {
@@ -308,13 +312,18 @@ type rateBucket struct {
 
 func newRateLimiter(capacity int, window time.Duration) *rateLimiter {
 	return &rateLimiter{
-		capacity: float64(capacity),
-		window:   window,
-		buckets:  map[string]*rateBucket{},
+		window:  window,
+		buckets: map[string]*rateBucket{},
 	}
 }
 
-func (l *rateLimiter) allow(key string, now time.Time) bool {
+// allow consumes one token using the capacity supplied by the caller, so a
+// settings change applies immediately without mutating shared limiter state.
+func (l *rateLimiter) allow(key string, now time.Time, capacity int) bool {
+	if capacity < 1 {
+		capacity = 1
+	}
+	limit := float64(capacity)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if len(l.buckets) > 10000 {
@@ -326,14 +335,14 @@ func (l *rateLimiter) allow(key string, now time.Time) bool {
 	}
 	b, ok := l.buckets[key]
 	if !ok {
-		b = &rateBucket{tokens: l.capacity, last: now}
+		b = &rateBucket{tokens: limit, last: now}
 		l.buckets[key] = b
 	}
 	elapsed := now.Sub(b.last)
 	if elapsed > 0 {
-		b.tokens += elapsed.Seconds() * (l.capacity / l.window.Seconds())
-		if b.tokens > l.capacity {
-			b.tokens = l.capacity
+		b.tokens += elapsed.Seconds() * (limit / l.window.Seconds())
+		if b.tokens > limit {
+			b.tokens = limit
 		}
 		b.last = now
 	}
@@ -348,7 +357,7 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if sensitiveAuthPath(r) {
 			key := clientIP(r, s.cfg.TrustProxy)
-			if !s.limiter.allow(key, time.Now()) {
+			if !s.limiter.allow(key, time.Now(), s.settings.Get().AuthRateLimit) {
 				w.Header().Set("Retry-After", "60")
 				writeError(w, http.StatusTooManyRequests, "rate_limited", "too many authentication attempts", nil)
 				return
