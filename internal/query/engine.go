@@ -93,6 +93,12 @@ type ListOptions struct {
 	// Include are dot-separated field paths to resolve from other collections.
 	// Ejemplo: ["author.name", "project.title"]
 	Include []string
+
+	// IncludeAuthorize, when set, is called for every document resolved by an
+	// include. It receives the target collection definition and document so the
+	// caller can apply that collection's "view" rule. Returning false omits the
+	// included field (sets it to nil) instead of leaking the data.
+	IncludeAuthorize func(col string, def *collections.CollectionDef, doc collections.Document) (bool, error)
 }
 
 // ListResult is a page of documents.
@@ -198,6 +204,13 @@ func (e *Engine) List(ctx context.Context, collection string, opts ListOptions) 
 		if err != nil {
 			return err
 		}
+		// Conserva los documentos originales: si se combinan ?fields e ?include,
+		// la proyección puede recortar el campo de referencia, así que los
+		// includes se resuelven desde el documento sin proyectar.
+		var originals []collections.Document
+		if len(opts.Include) > 0 {
+			originals = items
+		}
 		if len(opts.Fields) > 0 {
 			projected := make([]collections.Document, len(items))
 			for i, d := range items {
@@ -208,7 +221,7 @@ func (e *Engine) List(ctx context.Context, collection string, opts ListOptions) 
 		if len(opts.Include) > 0 {
 			includeItems := make([]collections.Document, len(items))
 			for i, d := range items {
-				includeItems[i] = resolveInclude(d, opts.Include, e.Store)
+				includeItems[i] = resolveInclude(d, originals[i], opts.Include, e.Store, opts.IncludeAuthorize)
 			}
 			items = includeItems
 		}
@@ -604,55 +617,104 @@ func minInt(a, b int) int {
 	return b
 }
 
+// includeSystemFields are fields that must never be exposed through ?include=.
+// They are either internal identifiers, server-managed timestamps or auth
+// credentials, and copying them into a related collection would leak data that
+// sanitizeRecord normally strips from the response.
+var includeSystemFields = map[string]bool{
+	collections.FieldID:           true,
+	collections.FieldCreated:      true,
+	collections.FieldUpdated:      true,
+	collections.FieldPasswordHash: true,
+	collections.FieldTokenKey:     true,
+	collections.FieldEmail:        true,
+	collections.FieldVerified:     true,
+}
+
 // resolveInclude resuelve campos de otras colecciones basándose en el valor
 // de un campo de referencia en el documento actual.
-// Formato esperado en include: "reference.field", donde "reference" es a la vez
-// el nombre de la colección destino y el campo del documento actual que guarda
-// el ID referenciado.
+//
+// Formato: "reference.field", donde "reference" es a la vez el nombre de la
+// colección destino y el campo del documento actual que guarda el ID referenciado.
 // Ejemplo: "author.name" → toma doc["author"] como ID, busca ese documento en la
 // colección "author" y copia su campo "name" en la clave "author.name".
-// Los campos originales del documento se conservan; si la referencia no existe
-// o el campo resolvido no está, la clave incluida queda a nil.
-func resolveInclude(doc collections.Document, include []string, store storage.Storage) collections.Document {
+//
+// Comportamiento:
+//   - Los campos originales del documento se conservan.
+//   - Todas las referencias se resuelven dentro de una única ReadTx por documento
+//     (no una transacción por include), para no multiplicar el coste.
+//   - Los campos de sistema (id/created/updated/passwordHash/tokenKey/email/
+//     verified) nunca se exponen: la clave incluida queda a nil.
+//   - Si el documento referenciado existe pero el callback de autorización lo
+//     rechaza (regla "view" de la colección destino), la clave queda a nil.
+//   - Si la referencia no existe o el campo no está, la clave queda a nil.
+func resolveInclude(
+	doc collections.Document,
+	original collections.Document,
+	include []string,
+	store storage.Storage,
+	authorize func(col string, def *collections.CollectionDef, doc collections.Document) (bool, error),
+) collections.Document {
 	out := doc.Clone()
+	// Los includes con formato inválido o campo de sistema se dejan a nil sin
+	// llegar a abrir la transacción.
+	valid := make([]string, 0, len(include))
+	seen := make(map[string]bool, len(include))
 	for _, inc := range include {
 		parts := strings.Split(inc, ".")
-		if len(parts) != 2 {
-			// Formato inválido, se omite
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 			continue
 		}
-		col, field := parts[0], parts[1]
-		// El campo de referencia en el documento actual tiene el mismo nombre
-		// que la colección destino (p. ej. "author" → colección "author").
-		refID := collections.GetPath(doc, col)
-		refStr, ok := refID.(string)
-		if !ok || refStr == "" {
+		if includeSystemFields[parts[1]] {
 			out[inc] = nil
 			continue
 		}
-		var resolved collections.Document
-		err := store.View(func(tx storage.ReadTx) error {
-			if _, err := tx.Collection(col); err != nil {
-				return err
+		if seen[inc] {
+			continue
+		}
+		seen[inc] = true
+		valid = append(valid, inc)
+	}
+	if len(valid) == 0 || store == nil {
+		return out
+	}
+
+	// Una sola transacción de lectura resuelve todas las referencias del documento.
+	_ = store.View(func(tx storage.ReadTx) error {
+		for _, inc := range valid {
+			parts := strings.Split(inc, ".")
+			col, field := parts[0], parts[1]
+
+			refStr, ok := collections.GetPath(original, col).(string)
+			if !ok || refStr == "" {
+				out[inc] = nil
+				continue
+			}
+			def, err := tx.Collection(col)
+			if err != nil {
+				out[inc] = nil
+				continue
 			}
 			refDoc, found, err := tx.GetDoc(col, refStr)
 			if err != nil || !found {
-				return nil // No encontrado, se deja vacío
+				out[inc] = nil
+				continue
 			}
-			resolved = refDoc
-			return nil
-		})
-		if err != nil || resolved == nil {
-			out[inc] = nil
-			continue
+			if authorize != nil {
+				allowed, err := authorize(col, def, refDoc)
+				if err != nil || !allowed {
+					out[inc] = nil
+					continue
+				}
+			}
+			if v := collections.GetPath(refDoc, field); v != nil {
+				out[inc] = v
+			} else {
+				out[inc] = nil
+			}
 		}
-		// Copiar únicamente el campo solicitado del documento resolvido.
-		if v := collections.GetPath(resolved, field); v != nil {
-			out[inc] = v
-		} else {
-			out[inc] = nil
-		}
-	}
+		return nil
+	})
 	return out
 }
 

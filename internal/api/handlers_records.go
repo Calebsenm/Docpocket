@@ -86,6 +86,15 @@ func (s *Server) listRecords(w http.ResponseWriter, r *http.Request, admin bool)
 		opts.Authorize = func(doc collections.Document) (bool, error) {
 			return s.authorizeQuery(def, "list", id, authMap, doc, nil, queryMap)
 		}
+		// Los campos incluidos de otras colecciones deben respetar la regla
+		// "view" de la colección referenciada. Sin esto, un ?include= podría
+		// filtrar documentos que el usuario no podría ver directamente.
+		opts.IncludeAuthorize = func(col string, refDef *collections.CollectionDef, doc collections.Document) (bool, error) {
+			if _, ok := refDef.RuleSet("view"); !ok {
+				return false, nil // regla no configurada → cerrado por defecto
+			}
+			return s.authorizeQuery(refDef, "view", id, authMap, doc, nil, queryMap)
+		}
 	}
 	if viewName := r.URL.Query().Get("view"); viewName != "" {
 		var found *collections.SavedView
