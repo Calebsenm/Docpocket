@@ -49,3 +49,6 @@ Thumbs.db
 # Proposals (dev-only, not committed)
 /propuestas/
 /examples/nexo-desk
+
+# Documentation (generated/work-in-progress, not part of core repo)
+/docs/
