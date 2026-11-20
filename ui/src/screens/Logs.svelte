@@ -105,13 +105,11 @@
   </div>
 
   {#if error}
-    <StateBlock kind="error" message={error}>
-      <button class="btn" onclick={load}>Reintentar</button>
-    </StateBlock>
+    <StateBlock kind="error" title="No se pudo cargar el registro" detail={error} onRetry={load} />
   {:else if loading && !loaded}
-    <StateBlock kind="loading" message="Cargando registro…" />
+    <StateBlock kind="loading" title="Cargando registro…" />
   {:else if items.length === 0}
-    <StateBlock kind="empty" title="Sin entradas" message="No hay solicitudes que coincidan con los filtros." />
+    <StateBlock kind="empty" title="Sin entradas" detail="No hay solicitudes que coincidan con los filtros." />
   {:else}
     <div class="panel table-wrap">
       <table class="data-table log-table">

@@ -104,11 +104,9 @@
     <div class="panel section">
       <h2>Estado de la base de datos</h2>
       {#if checkError}
-        <StateBlock kind="error" message={checkError}>
-          <button class="btn" onclick={loadCheck}>Reintentar</button>
-        </StateBlock>
+        <StateBlock kind="error" title="No se pudo comprobar la base de datos" detail={checkError} onRetry={loadCheck} />
       {:else if loadingCheck}
-        <StateBlock kind="loading" message="Comprobando integridad…" />
+        <StateBlock kind="loading" title="Comprobando integridad…" />
       {:else if check}
         <dl class="details">
           <div><dt>Estado</dt><dd class:ok={check.issues?.length === 0} class:bad={check.issues?.length > 0}>{check.issues?.length === 0 ? 'Correcto' : 'Incidencias'}</dd></div>

@@ -109,13 +109,11 @@
   </div>
 
   {#if error}
-    <StateBlock kind="error" message={error}>
-      <button class="btn" onclick={load}>Reintentar</button>
-    </StateBlock>
+    <StateBlock kind="error" title="No se pudieron cargar las sesiones" detail={error} onRetry={load} />
   {:else if loading && !loaded}
-    <StateBlock kind="loading" message="Cargando sesiones…" />
+    <StateBlock kind="loading" title="Cargando sesiones…" />
   {:else if items.length === 0}
-    <StateBlock kind="empty" title="Sin sesiones" message="No hay sesiones activas que coincidan con los filtros." />
+    <StateBlock kind="empty" title="Sin sesiones" detail="No hay sesiones activas que coincidan con los filtros." />
   {:else}
     <div class="panel table-wrap">
       <table class="data-table">
@@ -139,7 +137,7 @@
               <td class="nowrap">{formatDate(row.createdAt)}</td>
               <td class="nowrap">{formatDate(row.expiresAt)}</td>
               <td>
-                <span class:used={row.used} class="state">{row.used ? 'Usada' : 'Activa'}</span>
+                <span class:used={row.used} class="session-state">{row.used ? 'Usada' : 'Activa'}</span>
               </td>
               <td class="num actions-cell">
                 <button class="btn ghost small" onclick={() => revokeFamily(row)} disabled={!row.family} title="Revocar esta familia de sesiones">
@@ -195,8 +193,8 @@
     background: var(--surface-2);
     font-size: 0.78rem;
   }
-  .state { color: var(--success); font-size: 0.8rem; }
-  .state.used { color: var(--text-muted); }
+  .session-state { color: var(--success); font-size: 0.8rem; }
+  .session-state.used { color: var(--text-muted); }
   .actions-cell { white-space: nowrap; }
   .small { padding: 0.25rem 0.5rem; margin-left: 0.25rem; }
 </style>

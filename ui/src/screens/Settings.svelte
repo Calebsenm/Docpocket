@@ -100,11 +100,9 @@
   </header>
 
   {#if error}
-    <StateBlock kind="error" message={error}>
-      <button class="btn" onclick={load}>Reintentar</button>
-    </StateBlock>
+    <StateBlock kind="error" title="No se pudieron cargar los ajustes" detail={error} onRetry={load} />
   {:else if loading && !loaded}
-    <StateBlock kind="loading" message="Cargando ajustes…" />
+    <StateBlock kind="loading" title="Cargando ajustes…" />
   {:else}
     <form class="panel settings-form" onsubmit={save}>
       <label class="field">

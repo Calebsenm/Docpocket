@@ -95,13 +95,11 @@
   </header>
 
   {#if error}
-    <StateBlock kind="error" message={error}>
-      <button class="btn" onclick={load}>Reintentar</button>
-    </StateBlock>
+    <StateBlock kind="error" title="No se pudieron cargar los superusuarios" detail={error} onRetry={load} />
   {:else if loading && !loaded}
-    <StateBlock kind="loading" message="Cargando superusuarios…" />
+    <StateBlock kind="loading" title="Cargando superusuarios…" />
   {:else if items.length === 0}
-    <StateBlock kind="empty" title="Sin superusuarios" message="Todavía no hay cuentas de administrador." />
+    <StateBlock kind="empty" title="Sin superusuarios" detail="Todavía no hay cuentas de administrador." />
   {:else}
     <div class="panel table-wrap">
       <table class="data-table">

@@ -11,28 +11,15 @@
   import Collections from './screens/Collections.svelte'
   import Users from './screens/Users.svelte'
   import Files from './screens/Files.svelte'
-  import Rules from './screens/Rules.svelte'
-  import Realtime from './screens/Realtime.svelte'
-  import Logs from './screens/Logs.svelte'
-  import Maintenance from './screens/Maintenance.svelte'
-  import Settings from './screens/Settings.svelte'
-  import Admins from './screens/Admins.svelte'
-  import Sessions from './screens/Sessions.svelte'
+  import SettingsHub from './screens/SettingsHub.svelte'
 
   const sections = [
-    { id: 'overview', label: 'Resumen', icon: 'grid', group: 'Panel' },
-    { id: 'collections', label: 'Colecciones', icon: 'database', group: 'Panel' },
-    { id: 'users', label: 'Usuarios', icon: 'users', group: 'Panel' },
-    { id: 'files', label: 'Archivos', icon: 'folder', group: 'Panel' },
-    { id: 'rules', label: 'Reglas CEL', icon: 'shield', group: 'Panel' },
-    { id: 'realtime', label: 'Tiempo real', icon: 'bolt', group: 'Panel' },
-    { id: 'logs', label: 'Registro', icon: 'list', group: 'Sistema' },
-    { id: 'maintenance', label: 'Mantenimiento', icon: 'wrench', group: 'Sistema' },
-    { id: 'settings', label: 'Ajustes', icon: 'settings', group: 'Sistema' },
-    { id: 'admins', label: 'Superusuarios', icon: 'key', group: 'Sistema' },
-    { id: 'sessions', label: 'Sesiones', icon: 'activity', group: 'Sistema' },
+    { id: 'overview', label: 'Resumen', icon: 'grid' },
+    { id: 'collections', label: 'Colecciones', icon: 'database' },
+    { id: 'users', label: 'Usuarios', icon: 'users' },
+    { id: 'files', label: 'Archivos', icon: 'folder' },
+    { id: 'settings', label: 'Ajustes', icon: 'settings' },
   ]
-  const groups = ['Panel', 'Sistema']
 
   let booting = $state(true)
   let fatalError = $state('')
@@ -89,17 +76,14 @@
           authenticated = true
         } catch (error) {
           if (error?.status === 401) {
-            // Sesión definitively rechazada: sí se puede descartar.
             configured = await checkSetup().catch(() => false)
           } else {
-            // Fallo de red: NUNCA borramos la sesión; mostramos estado de error.
             fatalError = error instanceof Error ? error.message : String(error)
           }
         }
       }
       await refreshHealth()
     } catch (error) {
-      // No se pudo ni siquiera consultar /api/admin/setup: conservar la sesión.
       fatalError = error instanceof Error ? error.message : String(error)
     } finally {
       booting = false
@@ -109,8 +93,7 @@
 
   async function refreshHealth() {
     try {
-      health = await apiFetch('/api/health', { auth: false, timeoutMs: 6000, key: 'header-health' })
-        .then(parseApiResponse)
+      health = await apiFetch('/api/health', { auth: false, timeoutMs: 6000 }).then(parseApiResponse)
       healthError = false
     } catch {
       healthError = true
@@ -131,13 +114,12 @@
 
   async function logout() {
     loggingOut = true
-    // El servidor se invalida ANTES de limpiar la sesión local.
     const result = await serverLogout()
     authenticated = false
     email = ''
     active = 'overview'
     loggingOut = false
-    notify(result.remote ? 'Sesión cerrada' : 'Sesión cerrada localmente; no se pudo confirmar en el servidor', result.remote ? 'success' : 'error')
+    notify(result.remote ? 'Sesión cerrada' : 'Sesión cerrada localmente', result.remote ? 'success' : 'error')
   }
 
   function applyTheme(value) {
@@ -150,9 +132,7 @@
     theme = order[(order.indexOf(theme) + 1) % order.length]
     try {
       localStorage.setItem('dp.theme', theme)
-    } catch {
-      // Sin persistencia, el tema sigue aplicado durante la sesión.
-    }
+    } catch {}
     applyTheme(theme)
   }
 
@@ -165,9 +145,7 @@
   onMount(() => {
     try {
       theme = localStorage.getItem('dp.theme') || 'auto'
-    } catch {
-      theme = 'auto'
-    }
+    } catch {}
     applyTheme(theme)
     globalThis.addEventListener?.('dp:session-expired', handleSessionExpired)
     boot()
@@ -184,16 +162,15 @@
     <div class="brand">
       <span class="brand-mark" aria-hidden="true">DP</span>
       <span class="brand-name">DocPocket</span>
-      <span class="brand-tag">ADMIN</span>
     </div>
     <div class="header-actions">
       {#if authenticated}
-        <div class="header-status" title="Estado real del servidor">
+        <div class="header-status" title="Estado del servidor">
           <span class="status-dot {statusClass}" aria-hidden="true"></span>
-          <span>{statusLabel}{health?.version ? ` · v${health.version}` : ''}</span>
+          <span>{statusLabel}</span>
         </div>
       {/if}
-      <button type="button" class="icon-button" onclick={cycleTheme} aria-label="Cambiar tema (auto, claro, oscuro)" title="Tema: {theme}">
+      <button type="button" class="icon-button" onclick={cycleTheme} aria-label="Cambiar tema" title="Tema: {theme}">
         <Icon name={theme === 'dark' ? 'moon' : theme === 'light' ? 'sun' : 'activity'} size={16} />
       </button>
       {#if authenticated}
@@ -215,8 +192,8 @@
       <div class="page card">
         <StateBlock
           kind="error"
-          title="No se pudo comprobar el estado del servidor"
-          detail={`${fatalError}. La sesión local se ha conservado; vuelve a intentarlo.`}
+          title="No se pudo comprobar el servidor"
+          detail={fatalError}
           onRetry={boot}
         />
       </div>
@@ -230,52 +207,34 @@
   {:else if !authenticated}
     <Login setup={!configured} onSuccess={onAuthenticated} />
   {:else}
-    <nav class="mobile-tabs" aria-label="Secciones del panel">
-      {#each sections as section (section.id)}
-        <button
-          type="button"
-          class="tab"
-          class:active={active === section.id}
-          aria-current={active === section.id ? 'page' : undefined}
-          onclick={() => (active = section.id)}
-        >
-          {section.label}
-        </button>
-      {/each}
-    </nav>
     <div class="app-body">
       <aside class="app-sidebar">
-        {#each groups as group (group)}
-          <p class="side-label">{group}</p>
-          {#each sections.filter((s) => s.group === group) as section (section.id)}
-            <button
-              type="button"
-              class="nav-item"
-              class:active={active === section.id}
-              aria-current={active === section.id ? 'page' : undefined}
-              onclick={() => (active = section.id)}
-            >
-              <Icon name={section.icon} size={16} />
-              <span>{section.label}</span>
-            </button>
-          {/each}
+        {#each sections as section (section.id)}
+          <button
+            type="button"
+            class="nav-item"
+            class:active={active === section.id}
+            aria-current={active === section.id ? 'page' : undefined}
+            onclick={() => (active = section.id)}
+          >
+            <Icon name={section.icon} size={16} />
+            <span>{section.label}</span>
+          </button>
         {/each}
-        <div class="side-footer">Panel de administración<br />DocPocket · un único binario</div>
+        <div class="side-footer">DocPocket · un único binario</div>
       </aside>
 
       <main class="app-main">
         <div class="page">
-          {#if active === 'overview'}<Overview />
+          {#if active === 'overview'}
+            <Overview
+              on:create-collection={() => (active = 'collections')}
+              on:open-collection={() => (active = 'collections')}
+            />
           {:else if active === 'collections'}<Collections />
           {:else if active === 'users'}<Users />
           {:else if active === 'files'}<Files />
-          {:else if active === 'rules'}<Rules />
-          {:else if active === 'realtime'}<Realtime />
-          {:else if active === 'logs'}<Logs />
-          {:else if active === 'maintenance'}<Maintenance />
-          {:else if active === 'settings'}<Settings />
-          {:else if active === 'admins'}<Admins />
-          {:else if active === 'sessions'}<Sessions />
+          {:else if active === 'settings'}<SettingsHub />
           {/if}
         </div>
       </main>

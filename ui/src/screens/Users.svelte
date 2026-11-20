@@ -161,7 +161,7 @@
     <section class="card">
       <div class="card-head">
         <div class="card-title-group">
-          <h2>{formatNumber(users.length)} usuarios en <code>{selectedCollection}</code></h2>
+          <h2>{formatNumber(users.length)} {users.length === 1 ? 'usuario' : 'usuarios'} en <code>{selectedCollection}</code></h2>
           <p class="muted tiny">Los datos se leen del endpoint de administración de registros.</p>
         </div>
         <div class="search-input">

@@ -20,3 +20,9 @@ export function dismissToast(id) {
 
 /** Estado global de la sesión para la capa visual. */
 export const sessionState = writable({ loading: true, authenticated: false, email: '', setup: false, error: '' })
+
+/** Colección que otra pantalla (p. ej. Resumen) pide abrir. Se consume al usarse. */
+export const openCollection = writable('')
+
+/** Señal para abrir el diálogo de nueva colección desde otra pantalla. */
+export const createCollectionRequest = writable(0)
